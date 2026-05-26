@@ -56,3 +56,30 @@ async def test_dispatch_tenant_isolation_returns_empty_for_unknown_tenant() -> N
     )
     assert not is_error
     assert payload == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_role_gated_tool_rejects_wrong_role() -> None:
+    """get_audit_trail requires role='direccion'."""
+    payload, is_error, _ = await dispatch_tool(
+        "get_audit_trail",
+        {"request_id": "00000000-0000-0000-0000-000000000000"},
+        tenant_id=7,
+        role="marca",
+    )
+    assert is_error
+    assert payload["error"] == "forbidden_for_role"
+    assert "direccion" in [r.lower() for r in payload["required"]]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_role_gated_tool_accepts_correct_role() -> None:
+    payload, is_error, _ = await dispatch_tool(
+        "get_audit_trail",
+        {"request_id": "00000000-0000-0000-0000-000000000000"},
+        tenant_id=7,
+        role="direccion",
+    )
+    # role passes; the request_id does not exist => None (not an error)
+    assert not is_error
+    assert payload is None

@@ -86,7 +86,8 @@ async def run_conversation(
 
     client = client or get_client()
     system_prompt = system_prompt or GENERIC_SYSTEM_PROMPT
-    tools = anthropic_tools()
+    # Filter by role so the LLM never sees tools it cannot call.
+    tools = anthropic_tools(role=auth.role)
 
     messages: list[dict[str, Any]] = list(history or [])
     messages.append({"role": "user", "content": user_message})
@@ -129,7 +130,7 @@ async def run_conversation(
                     continue
                 tool_input = dict(getattr(block, "input", None) or {})
                 payload, is_error, ms = await dispatch_tool(
-                    block.name, tool_input, auth.tenant_id
+                    block.name, tool_input, auth.tenant_id, auth.role
                 )
                 result.tools_invoked.append(
                     ToolInvocation(

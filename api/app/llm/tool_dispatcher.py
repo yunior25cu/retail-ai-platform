@@ -30,6 +30,7 @@ async def dispatch_tool(
     tool_name: str,
     tool_input: dict[str, Any],
     tenant_id: int,
+    role: str | None = None,
 ) -> tuple[Any, bool, int]:
     """Execute a tool. Returns (payload, is_error, duration_ms).
 
@@ -37,6 +38,10 @@ async def dispatch_tool(
     LLM's ``tool_input`` is parsed by the tool's Pydantic model which does NOT
     declare ``tenant_id``; any 'tenant_id' Claude tries to inject is silently
     dropped during validation.
+
+    ROLE GATING: if the registry entry declares ``required_roles``, the caller's
+    role must be in that set. The check happens BEFORE input validation so that
+    forbidden tools never even touch the DB.
     """
     t0 = time.perf_counter()
 
@@ -44,6 +49,21 @@ async def dispatch_tool(
     if entry is None:
         log.warning("dispatch.unknown_tool", tool=tool_name, tenant=tenant_id)
         return ({"error": "unknown_tool", "tool": tool_name}, True, _elapsed_ms(t0))
+
+    required_roles = entry.get("required_roles")
+    if required_roles and (role or "").lower() not in {r.lower() for r in required_roles}:
+        log.warning(
+            "dispatch.forbidden_for_role",
+            tool=tool_name,
+            tenant=tenant_id,
+            role=role,
+            required=list(required_roles),
+        )
+        return (
+            {"error": "forbidden_for_role", "required": list(required_roles), "role": role},
+            True,
+            _elapsed_ms(t0),
+        )
 
     try:
         validated = entry["input_model"](**(tool_input or {})).model_dump()
