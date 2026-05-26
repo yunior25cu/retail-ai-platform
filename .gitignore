@@ -1,0 +1,39 @@
+# Environment / secrets
+.env
+.env.*
+*.secret
+secrets/
+
+# Build artifacts and caches
+*.bak
+*.log
+*.tmp
+*.cache
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+dist/
+build/
+bin/
+obj/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local discovery / exploration artifacts
+.discovery/
+backups/
+
+# OS
+desktop.ini
+
+# Connection-specific dumps
+*.connstring
+*.pfx
+*.key
