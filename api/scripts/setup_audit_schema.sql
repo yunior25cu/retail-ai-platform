@@ -57,6 +57,28 @@ END;
 GO
 
 ------------------------------------------------------------------
+-- conversation_message: persisted multi-turn history
+-- One row per Anthropic message (user / assistant). Content_json holds the
+-- raw content blocks as serialised by orchestrator so tool_use/tool_result
+-- cycles survive across turns.
+------------------------------------------------------------------
+IF OBJECT_ID('api_audit.conversation_message','U') IS NULL
+BEGIN
+    CREATE TABLE api_audit.conversation_message (
+        id               BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT pk_conv_msg PRIMARY KEY,
+        conversation_id  UNIQUEIDENTIFIER NOT NULL,
+        sequence         INT              NOT NULL,
+        role             NVARCHAR(20)     NOT NULL,            -- 'user' / 'assistant'
+        content_json     NVARCHAR(MAX)    NOT NULL,            -- anthropic content blocks
+        created_at       DATETIME2(3)     NOT NULL CONSTRAINT df_conv_msg_created DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT fk_conv_msg_conversation FOREIGN KEY (conversation_id)
+            REFERENCES api_audit.conversation(conversation_id)
+    );
+    CREATE INDEX ix_conv_msg_seq ON api_audit.conversation_message (conversation_id, sequence);
+END;
+GO
+
+------------------------------------------------------------------
 -- ai_audit_log: one row per /chat request
 -- Captures user question, tools invoked, final response, tokens, cost,
 -- duration. Hashes for large payloads (system prompt, tool responses)

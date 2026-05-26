@@ -30,6 +30,7 @@ from app.config import settings
 from app.llm.claude_client import get_client
 from app.llm.prompts.generic import GENERIC_SYSTEM_PROMPT
 from app.llm.tool_dispatcher import dispatch_tool
+from app.security.sanitizer import Sanitizer
 from app.tools import anthropic_tools
 
 log = structlog.get_logger(__name__)
@@ -66,6 +67,8 @@ async def run_conversation(
     client: anthropic.AsyncAnthropic | None = None,
     system_prompt: str | None = None,
     max_iterations: int = MAX_ITERATIONS,
+    sanitizer: Sanitizer | None = None,
+    conversation_id: str | None = None,
 ) -> ConversationResult:
     """Run one turn of the conversation through Claude with tool calling.
 
@@ -132,6 +135,15 @@ async def run_conversation(
                 payload, is_error, ms = await dispatch_tool(
                     block.name, tool_input, auth.tenant_id, auth.role
                 )
+                # SANITISER: for non-direccion roles, replace internal ids in
+                # the payload with opaque tokens before the LLM sees them.
+                if sanitizer is not None and conversation_id and not is_error:
+                    payload = await sanitizer.tokenize_payload(
+                        payload,
+                        conversation_id=conversation_id,
+                        tenant_id=auth.tenant_id,
+                        role=auth.role,
+                    )
                 result.tools_invoked.append(
                     ToolInvocation(
                         name=block.name,

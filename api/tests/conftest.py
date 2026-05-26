@@ -10,9 +10,16 @@ from fastapi.testclient import TestClient
 def client() -> Iterator[TestClient]:
     """Sync test client. Entering the context triggers FastAPI lifespan
     (pool initialise) so tests can hit the DB-backed endpoints."""
-    # Import inside fixture so failed config loads surface as test failures,
-    # not as collection errors.
     from app.main import app
 
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter() -> None:
+    """Make rate-limiter state local to each test. Without this, the in-memory
+    limiter accumulates hits across tests and triggers spurious 429s."""
+    from app.security.rate_limiter import limiter
+
+    limiter.reset()

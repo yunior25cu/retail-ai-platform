@@ -56,6 +56,14 @@ def test_chat_endpoint_returns_envelope(
 def test_chat_endpoint_echoes_conversation_id_when_provided(
     client: TestClient, monkeypatch
 ) -> None:
+    # Create a real conversation row first so the tenant-scoped lookup succeeds.
+    import asyncio
+    from app.db.conversation import create_conversation
+
+    conv_id = asyncio.run(
+        create_conversation(tenant_id=7, user_id="dev-user", user_role="direccion")
+    )
+
     fake = ConversationResult(
         request_id="req-2",
         response_text="ok",
@@ -67,10 +75,35 @@ def test_chat_endpoint_echoes_conversation_id_when_provided(
 
     resp = client.post(
         "/api/v1/chat",
-        json={"message": "hola", "conversation_id": "conv-abc-123"},
+        json={"message": "hola", "conversation_id": conv_id},
     )
     assert resp.status_code == 200
-    assert resp.json()["conversation_id"] == "conv-abc-123"
+    assert resp.json()["conversation_id"].lower() == conv_id.lower()
+
+
+def test_chat_endpoint_404_for_foreign_conversation(
+    client: TestClient, monkeypatch
+) -> None:
+    """A conversation belonging to tenant=7 cannot be opened by tenant=99."""
+    import asyncio
+    from app.db.conversation import create_conversation
+
+    conv_id = asyncio.run(
+        create_conversation(tenant_id=7, user_id="dev-user", user_role="direccion")
+    )
+
+    fake = ConversationResult(
+        request_id="req-z", response_text="x", iterations=1, stop_reason="end_turn"
+    )
+    monkeypatch.setattr("app.api.v1.chat.run_conversation", _make_fake_runner(fake))
+
+    resp = client.post(
+        "/api/v1/chat",
+        json={"message": "hola", "conversation_id": conv_id},
+        headers={"X-Mock-Tenant": "99", "X-Mock-User": "boss"},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "conversation_not_found_for_tenant"
 
 
 def test_chat_endpoint_503_when_anthropic_key_missing(
