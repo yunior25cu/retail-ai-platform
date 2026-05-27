@@ -1,12 +1,16 @@
 """FastAPI auth dependency.
 
 Resolution order:
-    1. If ``Authorization: Bearer <jwt>`` header is present, decode the JWT and
+    1. If SERVICE_KEY is configured AND ``X-Service-Key`` header matches,
+       resolve identity from X-Tenant-Id / X-User-Id / X-User-Role headers
+       (service-to-service mode, called by ERP proxy).
+    2. If SERVICE_MODE=true and no matching service key, reject with 401.
+    3. If ``Authorization: Bearer <jwt>`` header is present, decode the JWT and
        use its claims. Invalid / expired tokens -> 401.
-    2. Otherwise, fall back to the mock headers ``X-Mock-User`` /
+    4. Otherwise, fall back to the mock headers ``X-Mock-User`` /
        ``X-Mock-Tenant`` / ``X-Mock-Role``. This convenience path is disabled
        in production by setting ``AUTH_REQUIRE_JWT=true`` in the environment.
-    3. With no headers at all and AUTH_REQUIRE_JWT=false, defaults to
+    5. With no headers at all and AUTH_REQUIRE_JWT=false, defaults to
        ``dev-user`` / tenant=7 / role=direccion for local exploration.
 """
 
@@ -39,8 +43,42 @@ async def get_auth_context(
     x_mock_tenant: Annotated[int | None, Header(alias="X-Mock-Tenant")] = None,
     x_mock_role: Annotated[str | None, Header(alias="X-Mock-Role")] = None,
 ) -> AuthContext:
-    auth_header = request.headers.get("Authorization", "")
+    # --- Service-to-service path ---
+    # Activated only when SERVICE_KEY is configured and the header matches.
+    # Allows ERPs to call /api/v1/chat with service headers (e.g. for testing).
+    # The dedicated /api/v1/internal/chat endpoint always uses service auth.
+    if settings.service_key and request.headers.get("X-Service-Key"):
+        provided = request.headers.get("X-Service-Key", "")
+        if provided != settings.service_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid service key",
+            )
+        tenant_id_str = request.headers.get("X-Tenant-Id", "").strip()
+        if not tenant_id_str:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing required header: X-Tenant-Id",
+            )
+        role = (request.headers.get("X-User-Role") or "sku").lower()
+        if role not in VALID_ROLES:
+            role = "sku"
+        return AuthContext(
+            user_id=request.headers.get("X-User-Id") or "service-user",
+            tenant_id=int(tenant_id_str),
+            role=role,
+        )
 
+    # SERVICE_MODE=true: reject all non-service requests
+    if settings.service_mode:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing_service_key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # --- Bearer JWT path ---
+    auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
         try:
@@ -63,7 +101,7 @@ async def get_auth_context(
             role=role,
         )
 
-    # Mock path
+    # --- Mock path (dev / CLI / tests) ---
     if settings.auth_require_jwt:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

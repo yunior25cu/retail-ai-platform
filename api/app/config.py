@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # ---- Conversational memory ----
     memory_turns_per_request: int = 3  # user+assistant pairs loaded from DB per request
 
+    # ---- Service-to-service auth ----
+    service_key: str = ""          # shared secret with the ERP proxy; empty = service auth disabled
+    service_mode: bool = False     # True = reject all non-service requests (production only)
+
     @property
     def odbc_connection_string(self) -> str:
         """ODBC connection string built from individual settings."""

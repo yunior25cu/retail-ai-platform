@@ -10,6 +10,28 @@ Versions correspond to sub-phases of the project roadmap (Phase 3 = Gold warehou
 
 ---
 
+## [0.6.1] — 2026-05-27
+
+### Added
+- `api/app/auth/service_auth.py` — `ServiceAuthContext` + `get_service_auth_context()`
+  dependency for service-to-service auth via X-Service-Key header.
+- `api/app/api/v1/internal.py` — `POST /api/v1/internal/chat` endpoint for ERP
+  proxy calls (mirrors `/chat` flow, uses service auth instead of Bearer JWT).
+- `GET /api/v1/health/ready` — deep readiness probe: verifies DB, Anthropic key,
+  and service-key configuration. Intended for ERP startup checks.
+- `api/tests/test_service_auth.py` — 8 tests covering valid key, invalid key,
+  missing tenant, role normalisation, backward compatibility, health/ready,
+  internal chat, and 401 without key.
+
+### Changed
+- `api/app/config.py` — new settings `SERVICE_KEY` and `SERVICE_MODE`.
+- `api/app/auth/dependencies.py` — dual-mode detection: service-to-service path
+  activates only when SERVICE_KEY is configured AND X-Service-Key header is present.
+- `api/app/api/router.py` — registers `internal.router` under `/api/v1`.
+- `api/.env.example` — documents `SERVICE_KEY` and `SERVICE_MODE`.
+
+---
+
 ## [0.4.8] — 2026-05-27
 
 ### Cambiado

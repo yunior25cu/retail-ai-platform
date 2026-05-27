@@ -2,9 +2,10 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import chat, conversations, health
+from app.api.v1 import chat, conversations, health, internal
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(health.router)
 router.include_router(chat.router)
 router.include_router(conversations.router)
+router.include_router(internal.router)
