@@ -4,6 +4,8 @@ This document is the Phase 4 reference for the twelve function-calling tools exp
 
 For the Phase 3 source ERP tables that feed the Gold layer (the eight `dbo.*` tables), see [discovery/01-erp-discovery.md](discovery/01-erp-discovery.md) and [architecture.md](architecture.md).
 
+For the ERP-specific SQL connector scripts, see [`../sql/connectors/balaxys/`](../sql/connectors/balaxys/) (Balaxys ERP — scripts 03 and 04 moved from `sql/gold/` in v0.4.8) and [`integration-contract.md`](integration-contract.md) for the integration contract.
+
 ---
 
 ## Table of contents

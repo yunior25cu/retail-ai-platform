@@ -10,6 +10,24 @@ Versions correspond to sub-phases of the project roadmap (Phase 3 = Gold warehou
 
 ---
 
+## [0.4.8] — 2026-05-27
+
+### Cambiado
+- Reorganización de `sql/`: scripts específicos de Balaxys movidos a
+  `sql/connectors/balaxys/` para soportar arquitectura multi-ERP.
+  Scripts movidos: `03_enrichment_tables.sql`, `04_seeding_procs_emp7.sql`.
+- `sql/gold/README.md` — nota sobre nueva ubicación de scripts 03 y 04.
+- `docs/data-contract.md` — referencia a `sql/connectors/balaxys/`.
+
+### Agregado
+- `sql/connectors/README.md` — índice de conectores ERP disponibles.
+- `sql/connectors/balaxys/README.md` — documentación del conector Balaxys
+  con orden de ejecución y dependencias.
+- `docs/integration-contract.md` — contrato público de integración para
+  conectar cualquier ERP con retail-ai-platform.
+
+---
+
 ## [0.5.5] — 2026-05-27
 
 ### Added

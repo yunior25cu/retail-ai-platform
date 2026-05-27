@@ -1,5 +1,9 @@
 # `sql/gold` — Gold layer
 
+> **Nota:** los scripts 03 y 04 (específicos de Balaxys) se movieron
+> a `sql/connectors/balaxys/`. Ver el orden de ejecución completo
+> en [sql/connectors/balaxys/README.md](../connectors/balaxys/README.md)
+
 13 numbered SQL scripts that build the `[gold]` schema, populate it from
 the source ERP, and expose analytical views.
 
