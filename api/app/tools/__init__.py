@@ -38,6 +38,23 @@ from app.tools.brand import (
 )
 from app.tools.brand import TOOL_DESCRIPTION as BRAND_DESC
 from app.tools.brand import TOOL_NAME as BRAND_NAME
+from app.tools.briefings import (
+    REQUIRED_ROLES_EXEC_WEEKLY,
+    REQUIRED_ROLES_STORE_DAILY,
+    REQUIRED_ROLES_BRAND_WEEKLY,
+    TOOL_DESCRIPTION_EXEC_WEEKLY,
+    TOOL_DESCRIPTION_STORE_DAILY,
+    TOOL_DESCRIPTION_BRAND_WEEKLY,
+    TOOL_NAME_EXEC_WEEKLY,
+    TOOL_NAME_STORE_DAILY,
+    TOOL_NAME_BRAND_WEEKLY,
+    GetExecutiveWeeklyBriefingInput,
+    GetStoreDailyBriefingInput,
+    GetBrandWeeklyReviewInput,
+    get_executive_weekly_briefing,
+    get_store_daily_briefing,
+    get_brand_weekly_review,
+)
 from app.tools.compare import (
     GetComparePeriodsInput,
     compare_periods,
@@ -103,12 +120,14 @@ def _entry(
     fn: Callable[..., Any],
     input_model: type,
     required_roles: list[str] | None = None,
+    is_composite: bool = False,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "fn": fn,
         "input_model": input_model,
         "description": description,
         "anthropic": pydantic_to_anthropic_tool(name, description, input_model),
+        "is_composite": is_composite,
     }
     if required_roles:
         entry["required_roles"] = required_roles
@@ -116,18 +135,21 @@ def _entry(
 
 
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {
-    ALERTS_NAME:        _entry(ALERTS_NAME,        ALERTS_DESC,                get_active_alerts,           GetActiveAlertsInput),
-    STORE_NAME:         _entry(STORE_NAME,         STORE_DESC,                 get_store_dashboard,         GetStoreDashboardInput),
-    BRAND_NAME:         _entry(BRAND_NAME,         BRAND_DESC,                 get_brand_performance,       GetBrandPerformanceInput),
-    EXEC_NAME:          _entry(EXEC_NAME,          EXEC_DESC,                  get_executive_summary,       GetExecutiveSummaryInput),
-    SKU_DETAIL_NAME:    _entry(SKU_DETAIL_NAME,    SKU_DETAIL_DESCRIPTION,     get_sku_detail,              GetSkuDetailInput),
-    SKU_COVERAGE_NAME:  _entry(SKU_COVERAGE_NAME,  SKU_COVERAGE_DESCRIPTION,   get_sku_coverage_status,     GetSkuCoverageStatusInput),
-    VEL_NAME:           _entry(VEL_NAME,           VEL_DESC,                   get_velocity_segmentation,   GetVelocitySegmentationInput),
-    REC_NAME:           _entry(REC_NAME,           REC_DESC,                   get_action_recommendations,  GetActionRecommendationsInput),
-    COMPARE_NAME:       _entry(COMPARE_NAME,       COMPARE_DESC,               compare_periods,             GetComparePeriodsInput),
-    AUDIT_NAME:         _entry(AUDIT_NAME,         AUDIT_DESC,                 get_audit_trail,             GetAuditTrailInput, required_roles=AUDIT_ROLES),
-    MONTHLY_NAME:       _entry(MONTHLY_NAME,       MONTHLY_DESC,               get_monthly_summary,         GetMonthlySummaryInput, required_roles=MONTHLY_ROLES),
-    BRIEFING_NAME:      _entry(BRIEFING_NAME,      BRIEFING_DESC,              get_monthly_executive_briefing, GetMonthlyExecutiveBriefingInput, required_roles=BRIEFING_ROLES),
+    ALERTS_NAME:           _entry(ALERTS_NAME,           ALERTS_DESC,                  get_active_alerts,                 GetActiveAlertsInput),
+    STORE_NAME:            _entry(STORE_NAME,            STORE_DESC,                   get_store_dashboard,               GetStoreDashboardInput),
+    BRAND_NAME:            _entry(BRAND_NAME,            BRAND_DESC,                   get_brand_performance,             GetBrandPerformanceInput),
+    EXEC_NAME:             _entry(EXEC_NAME,             EXEC_DESC,                    get_executive_summary,             GetExecutiveSummaryInput,                is_composite=True),
+    SKU_DETAIL_NAME:       _entry(SKU_DETAIL_NAME,       SKU_DETAIL_DESCRIPTION,       get_sku_detail,                    GetSkuDetailInput),
+    SKU_COVERAGE_NAME:     _entry(SKU_COVERAGE_NAME,     SKU_COVERAGE_DESCRIPTION,     get_sku_coverage_status,           GetSkuCoverageStatusInput),
+    VEL_NAME:              _entry(VEL_NAME,              VEL_DESC,                     get_velocity_segmentation,         GetVelocitySegmentationInput),
+    REC_NAME:              _entry(REC_NAME,              REC_DESC,                     get_action_recommendations,        GetActionRecommendationsInput),
+    COMPARE_NAME:          _entry(COMPARE_NAME,          COMPARE_DESC,                 compare_periods,                   GetComparePeriodsInput),
+    AUDIT_NAME:            _entry(AUDIT_NAME,            AUDIT_DESC,                   get_audit_trail,                   GetAuditTrailInput,                      required_roles=AUDIT_ROLES),
+    MONTHLY_NAME:          _entry(MONTHLY_NAME,          MONTHLY_DESC,                 get_monthly_summary,               GetMonthlySummaryInput,                  required_roles=MONTHLY_ROLES),
+    BRIEFING_NAME:         _entry(BRIEFING_NAME,         BRIEFING_DESC,                get_monthly_executive_briefing,    GetMonthlyExecutiveBriefingInput,        required_roles=BRIEFING_ROLES,       is_composite=True),
+    TOOL_NAME_EXEC_WEEKLY: _entry(TOOL_NAME_EXEC_WEEKLY, TOOL_DESCRIPTION_EXEC_WEEKLY, get_executive_weekly_briefing,     GetExecutiveWeeklyBriefingInput,         required_roles=REQUIRED_ROLES_EXEC_WEEKLY, is_composite=True),
+    TOOL_NAME_STORE_DAILY: _entry(TOOL_NAME_STORE_DAILY, TOOL_DESCRIPTION_STORE_DAILY, get_store_daily_briefing,          GetStoreDailyBriefingInput,              required_roles=REQUIRED_ROLES_STORE_DAILY, is_composite=True),
+    TOOL_NAME_BRAND_WEEKLY:_entry(TOOL_NAME_BRAND_WEEKLY,TOOL_DESCRIPTION_BRAND_WEEKLY,get_brand_weekly_review,           GetBrandWeeklyReviewInput,               required_roles=REQUIRED_ROLES_BRAND_WEEKLY, is_composite=True),
 }
 
 

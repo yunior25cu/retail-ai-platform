@@ -29,11 +29,11 @@ from app.db.conversation import (
     append_message,
     create_conversation,
     load_conversation,
-    load_messages,
+    load_recent_messages,
     touch_conversation,
 )
 from app.llm.orchestrator import run_conversation
-from app.llm.prompts.generic import GENERIC_SYSTEM_PROMPT
+from app.llm.prompts import select_prompt
 from app.security.rate_limiter import RateLimitExceeded, limiter
 from app.security.sanitizer import Sanitizer
 
@@ -145,11 +145,14 @@ async def chat(
             detail={"scope": e.scope, "message": e.detail},
         ) from e
 
+    # Select role-specific system prompt once; used in orchestrator + audit row.
+    system_prompt = select_prompt(auth.role)
+
     # 2. Conversation (create or load tenant-scoped)
     conv_id = await _resolve_conversation(payload.conversation_id, auth)
 
-    # 3. Reconstruct history
-    history = await load_messages(conv_id)
+    # 3. Reconstruct history (last MEMORY_TURNS_PER_REQUEST turns only)
+    history = await load_recent_messages(conv_id, tenant_id=auth.tenant_id)
 
     # 4. Orchestrator with sanitiser
     sanitizer = Sanitizer()
@@ -160,18 +163,21 @@ async def chat(
             user_message=payload.message,
             auth=auth,
             history=history,
+            system_prompt=system_prompt,
             sanitizer=sanitizer,
             conversation_id=conv_id,
         )
     except RuntimeError as e:
         # Config error (ANTHROPIC_API_KEY missing, etc.)
         await _persist_failure_audit(
-            conv_id, auth, payload.message, str(e), int((time.perf_counter() - t0) * 1000)
+            conv_id, auth, payload.message, str(e), int((time.perf_counter() - t0) * 1000),
+            system_prompt=system_prompt,
         )
         raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         await _persist_failure_audit(
-            conv_id, auth, payload.message, str(e), int((time.perf_counter() - t0) * 1000)
+            conv_id, auth, payload.message, str(e), int((time.perf_counter() - t0) * 1000),
+            system_prompt=system_prompt,
         )
         raise HTTPException(status_code=500, detail="internal_error") from e
 
@@ -192,7 +198,7 @@ async def chat(
         user_id=auth.user_id,
         user_role=auth.role,
         user_question=payload.message,
-        system_prompt=GENERIC_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         tools_invoked=result.tools_invoked,
         final_response=result.response_text,
         tokens_input=result.tokens_input,
@@ -253,6 +259,8 @@ async def _persist_failure_audit(
     user_question: str,
     error: str,
     duration_ms: int,
+    *,
+    system_prompt: str,
 ) -> None:
     """Best-effort audit row for failures. Generates its own request_id since
     the orchestrator never produced one."""
@@ -263,7 +271,7 @@ async def _persist_failure_audit(
         user_id=auth.user_id,
         user_role=auth.role,
         user_question=user_question,
-        system_prompt=GENERIC_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         tools_invoked=None,
         final_response=None,
         tokens_input=0,

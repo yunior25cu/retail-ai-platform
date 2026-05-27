@@ -225,6 +225,49 @@ Note: counters are in-memory and reset on restart. For multi-worker or multi-ins
 
 ---
 
+## Eval framework — uso y baseline
+
+### Poblar el tenant sintético (una vez por base de datos)
+
+```bash
+# Pre-requisito: gold schema desplegado + dim_date poblado
+sqlcmd -S <server> -d <database> -U sa -P <password> \
+       -i sql/synthetic/01_tenant_9001_seed.sql
+```
+
+El script es idempotente: puede re-ejecutarse sin efectos secundarios.
+
+### Ejecutar el eval
+
+```bash
+cd api
+
+# Todas las preguntas — reporte en consola
+python -m app.evaluation.cli run --tenant 9001 --text
+
+# Guardar baseline (antes de cambiar prompts)
+python -m app.evaluation.cli run --tenant 9001 --output eval_baseline.json
+
+# Después de cambios: detectar regresiones
+python -m app.evaluation.cli run --tenant 9001 --output eval_after.json
+python -m app.evaluation.cli compare eval_baseline.json eval_after.json
+```
+
+Métricas clave en el output:
+- **tool_hit_rate** — % de preguntas donde Claude invocó al menos una herramienta esperada
+- **concept_coverage** — % de conceptos clave en español encontrados en la respuesta
+- **by_role** — desglose por rol (direccion / marca / tienda / sku)
+
+### Umbrales de calidad sugeridos
+
+| Métrica | Mínimo aceptable |
+|---|---|
+| `tool_hit_rate` | ≥ 0.80 |
+| `concept_coverage` | ≥ 0.60 |
+| `success_rate` | = 1.00 (sin errores) |
+
+---
+
 ## Gold layer — common failure modes
 
 | Symptom | Likely cause | Fix |

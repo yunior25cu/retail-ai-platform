@@ -593,6 +593,23 @@ async def fetch_compare_periods_monthly(
 
 
 # ----------------------------------------------------------------------------
+# Week resolution helpers (used by composite briefing tools)
+# ----------------------------------------------------------------------------
+async def fetch_latest_week(
+    tenant_id: int, *, store_id: int | None = None
+) -> str | None:
+    """Latest ISO week with sales for the tenant, optionally scoped to a store."""
+    sql = """
+        SELECT MAX(iso_year_week) AS w
+        FROM gold.fact_sales_weekly
+        WHERE tenant_id = ?
+          AND (? IS NULL OR store_id = ?);
+    """
+    rows = await execute_query(sql, (tenant_id, store_id, store_id))
+    return rows[0]["w"] if rows and rows[0]["w"] else None
+
+
+# ----------------------------------------------------------------------------
 # api_audit.ai_audit_log
 # ----------------------------------------------------------------------------
 async def fetch_audit_trail(

@@ -82,7 +82,7 @@ async def append_message(
 
 
 async def load_messages(conversation_id: str) -> list[dict[str, Any]]:
-    """Return messages in Anthropic format (role + content)."""
+    """Return all messages in Anthropic format (role + content), oldest first."""
     rows = await execute_query(
         """SELECT role, content_json
            FROM api_audit.conversation_message
@@ -90,6 +90,56 @@ async def load_messages(conversation_id: str) -> list[dict[str, Any]]:
            ORDER BY sequence ASC;""",
         (conversation_id,),
     )
+    return _parse_message_rows(rows)
+
+
+async def count_messages(conversation_id: str) -> int:
+    """Return the total number of messages stored for the conversation."""
+    rows = await execute_query(
+        """SELECT COUNT(*) AS cnt
+           FROM api_audit.conversation_message
+           WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
+        (conversation_id,),
+    )
+    return int(rows[0]["cnt"]) if rows else 0
+
+
+async def load_recent_messages(
+    conversation_id: str,
+    *,
+    tenant_id: int,
+    turns: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return the last *turns* user+assistant pairs, oldest first.
+
+    One turn = one user message + one assistant message (2 rows).
+    If *turns* is None, ``settings.memory_turns_per_request`` is used.
+    The tenant_id is verified via a subquery (defense-in-depth; the conversation
+    is already validated by ``load_conversation`` at request time).
+    """
+    from app.config import settings
+
+    effective_turns = turns if turns is not None else settings.memory_turns_per_request
+    limit = effective_turns * 2  # 2 messages per turn
+
+    # Fetch newest `limit` messages in DESC order, then reverse for chronological.
+    rows = await execute_query(
+        """SELECT TOP (?) role, content_json
+           FROM api_audit.conversation_message cm
+           WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
+             AND EXISTS (
+                 SELECT 1 FROM api_audit.conversation c
+                 WHERE c.conversation_id = cm.conversation_id
+                   AND c.tenant_id = ?
+             )
+           ORDER BY cm.sequence DESC;""",
+        (limit, conversation_id, tenant_id),
+    )
+    return _parse_message_rows(reversed(rows))
+
+
+def _parse_message_rows(rows: Any) -> list[dict[str, Any]]:
+    """Deserialise content_json → Anthropic message dicts. Skips malformed rows."""
     out: list[dict[str, Any]] = []
     for r in rows:
         try:

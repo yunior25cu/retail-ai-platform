@@ -10,6 +10,91 @@ Versions correspond to sub-phases of the project roadmap (Phase 3 = Gold warehou
 
 ---
 
+## [0.5.5] — 2026-05-27
+
+### Added
+- `sql/synthetic/01_tenant_9001_seed.sql` — datos sintéticos para `tenant_id=9001` (RetailDemo SA, Uruguay): 3 marcas, 5 tiendas, 200 SKUs, 52 semanas de historial relativo a la fecha de ejecución; moneda UYU; 4 escenarios de alerta (OVERSTOCK/UNDERSTOCK/OBSOLETE/STOCK_ZERO); distribución ABCD de velocidad; script idempotente DELETE+INSERT
+- `sql/synthetic/README.md` — documentación del tenant sintético, escenarios generados y uso con eval CLI
+
+---
+
+## [0.5.4] — 2026-05-27
+
+### Added
+- `api/app/evaluation/` — framework de eval completo:
+  - `catalog.py` — 20 preguntas (5 por rol) con expected_tools y expected_concepts en español
+  - `runner.py` — `EvalRunner` + `QuestionResult` + `EvalRun`; soporta mock-client para CI (sin API real)
+  - `metrics.py` — `compute_metrics`: tool_hit_rate, concept_coverage, success_rate, avg_latency, by_role
+  - `comparator.py` — `compare_runs`: detección de regresiones e mejoras entre dos runs
+  - `report.py` — `render_json` + `render_text` (tabla ✓/✗ por pregunta)
+  - `cli.py` — `python -m app.evaluation.cli run/compare`
+- 22 tests deterministas (mock SimpleNamespace + AsyncMock; sin llamadas reales a Anthropic)
+
+---
+
+## [0.5.3] — 2026-05-27
+
+### Added
+- `app/config.py` — `MEMORY_TURNS_PER_REQUEST: int = 3`: controls how many user+assistant pairs are loaded from DB per chat request; configurable via env for A/B testing without redeploy
+- `app/db/conversation.py` — `load_recent_messages(conv_id, *, tenant_id, turns=None)`: fetches last N turns in chronological order; uses `TOP + ORDER BY sequence DESC` + reverse for efficiency; tenant_id enforced via EXISTS subquery (defense-in-depth)
+- `app/db/conversation.py` — `count_messages(conv_id)`: total message count for a conversation
+- `app/db/conversation.py` — `_parse_message_rows()`: extracted helper for DRY JSON deserialization shared by `load_messages` and `load_recent_messages`
+- `app/api/v1/conversations.py` — `GET /api/v1/conversations/{id}`: returns conversation metadata (`total_messages`, `total_turns`, `memory_turns`, `recent_messages`); tenant-scoped 404 for unknown/foreign conversations
+- `app/api/router.py` — mounts the new conversations router under `/api/v1/conversations`
+- 13 new tests (182 total): `count_messages`, `load_recent_messages` (chronological order, turns limit, settings default, fewer-than-limit, role alternation, tenant isolation), summary endpoint (valid, 404 unknown, 404 foreign tenant)
+
+### Changed
+- `app/api/v1/chat.py` — replaces `load_messages(conv_id)` with `load_recent_messages(conv_id, tenant_id=auth.tenant_id)` so every request sees only the last 3 turns (configurable) instead of unbounded history
+- `app/api/v1/chat.py` — flow comment updated to reflect bounded memory
+
+### Environment variable added
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEMORY_TURNS_PER_REQUEST` | `3` | User+assistant pairs loaded from DB per chat request |
+
+---
+
+## [0.5.2] — 2026-05-27
+
+### Added
+- `app/llm/prompts/direccion.py` — `DIRECCION_SYSTEM_PROMPT`: 7-section prompt for directors; prioritises composite briefing tools, full access including audit trail
+- `app/llm/prompts/marca.py` — `MARCA_SYSTEM_PROMPT`: 7-section prompt for brand analysts; starts with `get_brand_weekly_review`, scoped to brand context
+- `app/llm/prompts/tienda.py` — `TIENDA_SYSTEM_PROMPT`: 7-section prompt for store managers; starts with `get_store_daily_briefing`, operational and action-first
+- `app/llm/prompts/sku.py` — `SKU_SYSTEM_PROMPT`: 7-section prompt for product analysts; SKU coverage + velocity segmentation focus
+- `app/llm/prompts/selector.py` — `select_prompt(role: str | None) -> str`: maps role to prompt constant; falls back to `GENERIC_SYSTEM_PROMPT` for unknown roles
+- `app/llm/prompts/__init__.py` — exports `select_prompt` as the public API
+- 32 new tests (169 total): routing for all 4 roles + fallback, 7-section presence, voseo enforcement, Spanish monolingual rule, role-specific tool mentions, chat.py import hygiene
+
+### Changed
+- `app/api/v1/chat.py` — computes `system_prompt = select_prompt(auth.role)` once per request and passes it to `run_conversation()`, the success audit row, and the failure audit row; eliminates the hardcoded `GENERIC_SYSTEM_PROMPT` reference in the chat pipeline
+- `app/api/v1/chat.py` — `_persist_failure_audit` gains `system_prompt` keyword argument for accurate audit logging of the prompt used during failed requests
+
+### All 7 prompt sections (per role)
+`## ROL` · `## HERRAMIENTAS` · `## WORKFLOW` · `## ESTILO` · `## IDIOMA` · `## TÉRMINOS` · `## LÍMITES`
+
+Each prompt enforces: español rioplatense con voseo · monolingual default (responds in Spanish if asked in other language) · Latin American business vocabulary · prohibition on invented numbers · explicit limits.
+
+---
+
+## [0.5.1] — 2026-05-27
+
+### Added
+- `app/tools/briefings.py` — three new composite tools (Sub-fase 5.1):
+  - `get_executive_weekly_briefing` (direccion) — tenant KPIs + plan vs actual + top-3 alerts + top-5 brands + top-3 actions in one round-trip; saves ~4 LLM iterations vs chaining individual tools
+  - `get_store_daily_briefing` (tienda, marca, direccion) — per-store KPIs + stock health + store-scoped alerts + RED/YELLOW SKU coverage, resolves latest week automatically
+  - `get_brand_weekly_review` (marca, direccion) — brand KPIs + brand-scoped alerts + ABCD velocity segmentation summary
+- `_gather_safe()` helper in `briefings.py`: `asyncio.gather(return_exceptions=True)` with `asyncio.wait_for(timeout=5.0)` per sub-call; failed sub-calls land in `_partial_failures` without cancelling the rest
+- `_composition` field in every briefing output describing which sub-calls were bundled
+- `fetch_latest_week(tenant_id, *, store_id=None)` in `app/db/queries.py` — resolves latest ISO week, optionally scoped to a store
+- `is_composite: bool` flag in `_entry()` / `TOOL_REGISTRY` — marks composite tools; retroactively applied to `get_executive_summary` and `get_monthly_executive_briefing`
+- 24 new tests (137 total): registry checks, input model validation, live-DB happy paths, `_partial_failures` propagation, `asyncio.wait_for` timeout test
+
+### Changed
+- `app/tools/__init__.py` — `TOOL_REGISTRY` now has 15 tools; `_entry()` gains `is_composite` parameter (default `False`, backward compatible)
+
+---
+
 ## [0.4.7] — 2026-05-27
 
 ### Added

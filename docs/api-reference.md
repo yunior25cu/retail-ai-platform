@@ -44,6 +44,39 @@ EOF
 
 ## Endpoints
 
+### GET /api/v1/conversations/{conversation_id}
+
+Returns metadata for an existing conversation. Tenant-scoped: returns 404 for unknown or foreign-tenant conversations.
+
+**Path parameter**: `conversation_id` — UUID of an existing conversation returned by `POST /api/v1/chat`.
+
+**Response 200**
+
+```json
+{
+  "conversation_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "user_role": "direccion",
+  "total_messages": 6,
+  "total_turns": 3,
+  "memory_turns": 3,
+  "recent_messages": [
+    {"role": "user",      "text": "¿Cuál es el resumen de la semana?"},
+    {"role": "assistant", "text": "Esta semana la facturación fue..."}
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `total_messages` | Total user+assistant messages persisted |
+| `total_turns` | `total_messages / 2` rounded down |
+| `memory_turns` | Value of `MEMORY_TURNS_PER_REQUEST` config (how many turns Claude sees) |
+| `recent_messages` | Last `memory_turns` turns in chronological order |
+
+**Response 404** — conversation not found or belongs to a different tenant.
+
+---
+
 ### GET /api/v1/health
 
 Liveness and DB readiness probe. No authentication required.

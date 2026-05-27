@@ -55,13 +55,23 @@ only re-derive what the ERP does not expose cleanly.
                                    │ tenant-scoped SELECT
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│ API (Phase 4, planned)                                              │
-│   REST endpoints, one per view + a few derived ones.                │
-│   Each endpoint = one function/tool for AI orchestration.           │
+│ API — Phase 4 ✅ + Phase 5 ✅                                        │
+│   15 tools (function-calling) + role-based system prompts           │
+│   POST /api/v1/chat  ·  GET /api/v1/health                          │
+│   GET /api/v1/conversations/{id}                                    │
+│   JWT auth · rate limiter · sanitizer · audit log                   │
+│   Bounded conversational memory (MEMORY_TURNS_PER_REQUEST=3)        │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│ AI agents (Phase 5, planned) + UI (Phase 6, planned)                │
+│ Eval framework — Phase 5.4 ✅                                        │
+│   20-question catalog (5/rol) · EvalRunner · metrics · comparator   │
+│   python -m app.evaluation.cli run/compare                          │
+│   Synthetic tenant 9001 (sql/synthetic/) — Phase 5.5 ✅             │
+└─────────────────────────────────────────────────────────────────────┘
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ UI (Phase 6, planned)                                               │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

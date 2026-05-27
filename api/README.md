@@ -1,14 +1,14 @@
 # Retail AI Platform — API
 
-![Tests](https://img.shields.io/badge/tests-88%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-204%20passed-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.13-blue)
-![Phase](https://img.shields.io/badge/phase-4%20complete-success)
+![Phase](https://img.shields.io/badge/phase-5.4%20complete-success)
 
-FastAPI service that turns the Gold data warehouse into a Claude-powered conversation interface. The API exposes ten analytical tools (alerts, dashboards, SKU analysis, period comparison, audit trail) via Anthropic's function-calling protocol and wraps every request with JWT auth, bi-directional data sanitization, in-memory rate limiting, and a full audit trail persisted in SQL Server.
+FastAPI service that turns the Gold data warehouse into a Claude-powered conversation interface. The API exposes fifteen analytical tools (alerts, dashboards, SKU analysis, period comparison, audit trail, monthly periodicity, and composite weekly briefings) via Anthropic's function-calling protocol and wraps every request with JWT auth, bi-directional data sanitization, in-memory rate limiting, and a full audit trail persisted in SQL Server.
 
 The architecture is intentionally single-layer: Claude selects and invokes the tools in the right order, accumulates facts across multiple calls within one conversation, and composes a natural-language answer. The API enforces tenant isolation at every layer — auth claims, SQL `WHERE tenant_id`, and the sanitizer token map are all scoped per tenant.
 
-Phase 4 is complete: 88 tests pass, all 10 tools are exercised through the tool-calling loop, and the end-to-end pipeline (chat → orchestrator → SQL → audit) is wired. Phase 5 (per-role agent prompts, triage/brand/store agents) is next.
+Sub-fase 5.4 is complete: 204 tests pass, 15 tools, 4 role prompts, bounded 3-turn conversational memory, and a full eval framework (20-question catalog, runner, metrics comparator, text/JSON reports, CLI).
 
 ---
 
@@ -60,6 +60,7 @@ uvicorn app.main:app --reload
 | `RATE_LIMIT_TENANT_HOUR` | `100` | Max requests per hour per tenant |
 | `RATE_LIMIT_USER_HOUR` | `30` | Max requests per hour per user |
 | `RATE_LIMIT_TOKENS_DAY` | `1000000` | Max tokens per day per tenant |
+| `MEMORY_TURNS_PER_REQUEST` | `3` | User+assistant pairs loaded per chat request |
 
 ---
 
@@ -211,10 +212,45 @@ python -m app.tools.cli get_monthly_summary --tenant 7 --year-month 2026-04 --sc
 # Monthly executive briefing (direccion only)
 python -m app.tools.cli get_monthly_executive_briefing --tenant 7 --role direccion --pretty
 
+# Executive weekly briefing (composite — saves ~4 LLM iterations)
+python -m app.tools.cli get_executive_weekly_briefing --tenant 7 --role direccion --pretty
+
+# Store daily briefing
+python -m app.tools.cli get_store_daily_briefing --tenant 7 --role tienda --store-id 1 --pretty
+
+# Brand weekly review
+python -m app.tools.cli get_brand_weekly_review --tenant 7 --role marca --brand-id 1 --pretty
+
 # Audit trail (direccion role required)
 python -m app.tools.cli get_audit_trail --tenant 7 --role direccion \
   --request-id <uuid> --pretty
 ```
+
+---
+
+## Eval framework
+
+The eval framework measures LLM quality without touching the Anthropic API in CI. It runs a 20-question catalog (5 per role) against a real tenant and scores each response on tool selection and concept coverage.
+
+```bash
+# Run all 20 questions against tenant 9001 (synthetic data)
+python -m app.evaluation.cli run --tenant 9001 --text
+
+# Run direccion questions only, save JSON artifact
+python -m app.evaluation.cli run --tenant 9001 --role direccion --output run_a.json
+
+# Run specific questions
+python -m app.evaluation.cli run --tenant 9001 --ids Q01,Q06,Q11 --text
+
+# Compare two runs (detect regressions after a prompt change)
+python -m app.evaluation.cli compare run_a.json run_b.json
+```
+
+Output metrics:
+- **tool_hit_rate** — % of questions where at least one expected tool was invoked
+- **concept_coverage** — % of expected Spanish concepts found in the response
+- **success_rate** — % of questions completed without errors
+- **by_role** — per-role breakdown of all metrics
 
 ---
 
@@ -271,13 +307,19 @@ api/
 │   │   ├── audit.py          -- get_audit_trail (direccion only)
 │   │   ├── monthly.py        -- get_monthly_summary (direccion, marca)
 │   │   ├── composite.py      -- get_monthly_executive_briefing (direccion)
+│   │   ├── briefings.py      -- get_executive_weekly_briefing + get_store_daily_briefing + get_brand_weekly_review
 │   │   └── cli.py            -- python -m app.tools.cli
 │   ├── llm/
 │   │   ├── claude_client.py  -- AsyncAnthropic factory
 │   │   ├── orchestrator.py   -- tool-calling loop → ConversationResult
 │   │   ├── tool_dispatcher.py -- role gate + Pydantic validation + execution
 │   │   └── prompts/
-│   │       └── generic.py    -- GENERIC_SYSTEM_PROMPT
+│   │       ├── generic.py    -- GENERIC_SYSTEM_PROMPT (fallback)
+│   │       ├── direccion.py  -- DIRECCION_SYSTEM_PROMPT
+│   │       ├── marca.py      -- MARCA_SYSTEM_PROMPT
+│   │       ├── tienda.py     -- TIENDA_SYSTEM_PROMPT
+│   │       ├── sku.py        -- SKU_SYSTEM_PROMPT
+│   │       └── selector.py   -- select_prompt(role) → str
 │   ├── security/
 │   │   ├── sanitizer.py      -- tokenize_payload / detokenize_text
 │   │   └── rate_limiter.py   -- sliding-window limiter + module singleton
@@ -286,8 +328,16 @@ api/
 │   └── api/
 │       ├── router.py         -- mounts /api/v1
 │       └── v1/
-│           ├── health.py     -- GET /api/v1/health
-│           └── chat.py       -- POST /api/v1/chat (full pipeline)
+│           ├── health.py         -- GET /api/v1/health
+│           ├── chat.py           -- POST /api/v1/chat (full pipeline)
+│           └── conversations.py  -- GET /api/v1/conversations/{id} (summary)
+├── evaluation/
+│   ├── catalog.py    -- 20-question eval catalog (5 per role)
+│   ├── runner.py     -- EvalRunner + QuestionResult + EvalRun
+│   ├── metrics.py    -- compute_metrics (tool_hit_rate, concept_coverage, by_role)
+│   ├── comparator.py -- compare_runs → RunComparison (regressions / improvements)
+│   ├── report.py     -- render_json + render_text (✓/✗ per-question table)
+│   └── cli.py        -- python -m app.evaluation.cli run / compare
 └── tests/
     ├── conftest.py           -- TestClient fixture + reset_rate_limiter autouse
     ├── test_health.py
@@ -295,7 +345,9 @@ api/
     ├── test_tools/
     ├── test_llm/
     ├── test_security/
-    └── test_audit/
+    ├── test_audit/
+    ├── test_db/
+    └── test_evaluation/
 ```
 
 ---
@@ -359,7 +411,11 @@ For roles other than `direccion`, the sanitizer replaces `sku_id`, `store_id`, a
 
 ## Roadmap
 
-- **Phase 5 🚧** — Per-role system prompts; triage, brand-analyst, store-analyst and what-if agents built on top of the 10 tools
+- **Phase 5.1 ✅** — Three composite weekly briefing tools with parallel sub-calls (`asyncio.gather`), 5s timeouts, and partial-failure isolation; `is_composite` flag in registry; 15 tools total
+- **Phase 5.2 ✅** — Four role-specific system prompts (direccion, marca, tienda, sku) with 7 mandatory sections each; `select_prompt(role)` wired into `chat.py`; 169 tests
+- **Phase 5.3 ✅** — Bounded 3-turn memory (`MEMORY_TURNS_PER_REQUEST=3`); `load_recent_messages` with tenant isolation; `GET /api/v1/conversations/{id}` summary endpoint; 182 tests
+- **Phase 5.4 ✅** — Eval framework: 20-question catalog, EvalRunner with mock-client CI support, metrics (tool_hit_rate, concept_coverage, by_role), RunComparison for regression detection, text/JSON reports, CLI (`python -m app.evaluation.cli`); 204 tests
+- **Phase 5.5 ✅** — Synthetic retail data for `tenant_id=9001` (`sql/synthetic/01_tenant_9001_seed.sql`): 3 brands, 5 stores, 200 SKUs, 52 weeks; 4 alert scenarios (OVERSTOCK/UNDERSTOCK/OBSOLETE/STOCK_ZERO); ABCD velocity distribution; idempotente DELETE+INSERT
 - **Phase 6 ⏳** — Operational console UI: per-store dashboard, weekly action list, alert drill-down, plan-vs-actual chart
 - **Phase 7 ⏳** — Multi-tenant onboarding automation; Redis-backed rate limiter for multi-worker deployments; advanced cost and margin analytics
 

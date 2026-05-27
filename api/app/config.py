@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     rate_limit_user_hour: int = 30
     rate_limit_tokens_day: int = 1_000_000
 
+    # ---- Conversational memory ----
+    memory_turns_per_request: int = 3  # user+assistant pairs loaded from DB per request
+
     @property
     def odbc_connection_string(self) -> str:
         """ODBC connection string built from individual settings."""
