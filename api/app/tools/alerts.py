@@ -49,6 +49,10 @@ class ActiveAlertItem(BaseModel):
     store_id: int | None
     sku_id: int | None
     brand_id: int | None
+    sku_code: str | None = None
+    sku_name: str | None = None
+    brand_name: str | None = None
+    store_name: str | None = None
     metric_value: float | None
     threshold: float | None
     suggested_action: str | None

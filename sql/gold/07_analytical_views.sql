@@ -77,6 +77,7 @@ SELECT
     COALESCE(ds.brand_id, 0)                                       AS brand_id,
     COALESCE(ds.brand_name, N'SIN MARCA')                          AS brand_name,
     COALESCE(ds.category_id, 0)                                    AS category_id,
+    COALESCE(dst.store_name, N'SIN TIENDA')                          AS store_name,
     s.stock_units,
     s.stock_value,
     s.unit_cost,
@@ -109,6 +110,8 @@ LEFT JOIN gold.dim_sku ds
     ON ds.tenant_id = s.tenant_id AND ds.sku_id = s.sku_id
 LEFT JOIN velocity_4w v
     ON v.tenant_id = s.tenant_id AND v.store_id = s.store_id AND v.sku_id = s.sku_id
+LEFT JOIN gold.dim_store dst
+    ON dst.tenant_id = s.tenant_id AND dst.store_id = s.store_id
 LEFT JOIN gold.dim_date dd_w
     ON dd_w.iso_year_week = s.iso_year_week AND dd_w.day_of_week = 7
 OUTER APPLY (
@@ -359,6 +362,7 @@ WITH base AS (
     SELECT
         cs.tenant_id, cs.iso_year_week, cs.store_id, cs.sku_id,
         cs.brand_id, cs.brand_name, cs.sku_code, cs.sku_name,
+        cs.store_name,
         cs.stock_units, cs.stock_value, cs.unit_cost,
         cs.has_zero_stock_flag, cs.is_obsolete_flag,
         cs.days_since_last_sale, cs.days_coverage,
@@ -378,6 +382,7 @@ stock_zero_alerts AS (
         b.tenant_id, b.iso_year_week,
         N'SKU'                                                    AS [level],
         b.store_id, b.sku_id, b.brand_id,
+        b.sku_code, b.sku_name, b.brand_name, b.store_name,
         N'STOCK_ZERO'                                             AS alert_type,
         CASE WHEN b.units_per_day_4w > 0 THEN N'HIGH' ELSE N'MEDIUM' END AS severity,
         b.stock_units                                             AS metric_value,
@@ -397,6 +402,7 @@ obsolete_alerts AS (
         b.tenant_id, b.iso_year_week,
         N'SKU'                                                    AS [level],
         b.store_id, b.sku_id, b.brand_id,
+        b.sku_code, b.sku_name, b.brand_name, b.store_name,
         N'OBSOLETE'                                               AS alert_type,
         CASE WHEN b.stock_value > 0 THEN N'MEDIUM' ELSE N'LOW' END AS severity,
         CAST(b.days_since_last_sale AS DECIMAL(18,4))             AS metric_value,
@@ -416,6 +422,7 @@ overstock_alerts AS (
         b.tenant_id, b.iso_year_week,
         N'SKU'                                                    AS [level],
         b.store_id, b.sku_id, b.brand_id,
+        b.sku_code, b.sku_name, b.brand_name, b.store_name,
         N'OVERSTOCK'                                              AS alert_type,
         CASE WHEN b.days_coverage > 2 * b.target_max_days THEN N'HIGH' ELSE N'MEDIUM' END AS severity,
         b.days_coverage                                           AS metric_value,
@@ -441,6 +448,7 @@ understock_alerts AS (
         b.tenant_id, b.iso_year_week,
         N'SKU'                                                    AS [level],
         b.store_id, b.sku_id, b.brand_id,
+        b.sku_code, b.sku_name, b.brand_name, b.store_name,
         N'UNDERSTOCK'                                             AS alert_type,
         CASE WHEN b.days_coverage < 0.5 * b.target_min_days THEN N'HIGH' ELSE N'MEDIUM' END AS severity,
         b.days_coverage                                           AS metric_value,
@@ -486,6 +494,7 @@ WITH scored AS (
 SELECT
     s.alert_id, s.tenant_id, s.iso_year_week, s.[level],
     s.store_id, s.sku_id, s.brand_id,
+    s.sku_code, s.sku_name, s.brand_name, s.store_name,
     s.alert_type, s.severity, s.metric_value, s.threshold,
     s.suggested_action, s.estimated_impact_usd,
     s.severity_weight, s.priority_score,

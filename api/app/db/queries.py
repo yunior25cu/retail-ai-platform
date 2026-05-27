@@ -50,6 +50,7 @@ async def fetch_active_alerts(
         SELECT TOP (?)
             alert_id, iso_year_week, [level], alert_type, severity,
             store_id, sku_id, brand_id,
+            sku_code, sku_name, brand_name, store_name,
             metric_value, threshold, suggested_action, estimated_impact_usd
         FROM gold.vw_active_alerts
         WHERE tenant_id = ?
@@ -125,7 +126,7 @@ async def fetch_sku_coverage_status(
 ) -> list[dict[str, Any]]:
     sql = """
         SELECT TOP (?)
-            iso_year_week, store_id, sku_id, sku_code, sku_name,
+            iso_year_week, store_id, sku_id, sku_code, sku_name, store_name,
             brand_id, brand_name, category_id,
             stock_units, stock_value, unit_cost,
             has_zero_stock_flag, is_obsolete_flag, days_since_last_sale,
@@ -198,6 +199,7 @@ async def fetch_action_recommendations(
         SELECT TOP (?)
             alert_id, iso_year_week, [level], alert_type, severity,
             store_id, sku_id, brand_id,
+            sku_code, sku_name, brand_name, store_name,
             metric_value, threshold, suggested_action, estimated_impact_usd,
             severity_weight, priority_score, priority_rank
         FROM gold.vw_action_recommendation_priority

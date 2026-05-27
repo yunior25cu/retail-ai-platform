@@ -28,3 +28,12 @@ async def test_get_action_recommendations_severity_filter() -> None:
 @pytest.mark.asyncio
 async def test_get_action_recommendations_unknown_tenant_returns_empty() -> None:
     assert await get_action_recommendations(tenant_id=99) == []
+
+
+@pytest.mark.asyncio
+async def test_action_recommendations_includes_names() -> None:
+    rows = await get_action_recommendations(tenant_id=23, limit=10)
+    assert len(rows) > 0
+    for r in rows:
+        assert r.get("sku_name") is not None, f"sku_name missing in {r}"
+        assert r.get("store_name") is not None, f"store_name missing in {r}"

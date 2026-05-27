@@ -57,6 +57,15 @@ def test_input_model_rejects_invalid_severity() -> None:
         GetActiveAlertsInput(severity="CRITICAL")  # not in AlertSeverity
 
 
+@pytest.mark.asyncio
+async def test_active_alerts_includes_names() -> None:
+    rows = await get_active_alerts(tenant_id=23, limit=10)
+    assert len(rows) > 0
+    for r in rows:
+        assert r.get("sku_name") is not None, f"sku_name missing in {r}"
+        assert r.get("store_name") is not None, f"store_name missing in {r}"
+
+
 def test_registry_includes_active_alerts() -> None:
     entry = TOOL_REGISTRY["get_active_alerts"]
     assert callable(entry["fn"])
