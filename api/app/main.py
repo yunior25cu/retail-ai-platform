@@ -58,11 +58,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Retail AI Platform — API",
-    version="0.1.0",
+    version="0.4.6",
     description=(
-        "Backend exposing Gold data warehouse as Claude tools (multi-tenant). "
-        "Phase 4 of the retail-ai-platform project."
+        "Multi-tenant conversational analytics API. "
+        "Exposes ten Gold data warehouse tools (alerts, dashboards, SKU analysis, "
+        "period comparison, audit trail) via Anthropic function-calling. "
+        "Every request is JWT-authenticated, role-gated, rate-limited, and fully "
+        "audited in the `api_audit` schema.\n\n"
+        "**Authentication**: Bearer JWT (HS256) required in production. "
+        "Set `AUTH_REQUIRE_JWT=true` to disable the `X-Mock-*` header fallback.\n\n"
+        "**Roles**: `direccion` (full access) · `marca` · `tienda` · `sku` "
+        "(sanitizer active — entity IDs replaced with opaque tokens).\n\n"
+        "Interactive docs: `/docs` (Swagger UI) · `/redoc` (ReDoc)"
     ),
+    contact={"name": "Retail AI Platform", "url": "https://github.com/your-org/retail-ai-platform"},
+    license_info={"name": "MIT"},
     lifespan=lifespan,
 )
 

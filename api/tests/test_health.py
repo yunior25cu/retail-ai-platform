@@ -21,4 +21,4 @@ def test_root_returns_app_metadata(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == "retail-ai-api"
-    assert body["version"] == "0.1.0"
+    assert body["version"] == "0.4.6"

@@ -4,16 +4,15 @@ A multi-tenant analytical platform that turns transactional ERP data into
 weekly retail decisions (replenish / transfer / liquidate / re-price) backed
 by AI-assisted recommendations.
 
-## Status
+## Estado del proyecto
 
-**Phase 3 complete — Gold data warehouse fully built and validated.**
-
-- 13 SQL scripts covering schema, dimensions, facts, analytical views,
-  orchestration, validation and an end-to-end dashboard script.
-- Smoke tests pass at the cent: `units_sold_net`, `revenue_net` and
-  `stock_units` cross-check exactly against the source ERP for the POC tenant.
-- End-to-end pipeline (refresh + validations + 7 dashboard grids) runs in
-  under 1 second for a small tenant.
+| Fase | Estado | Descripción |
+|---|---|---|
+| Fase 3 — Gold warehouse | ✅ Completo | 13 SQL scripts: dims, facts, 7 analytical views, orchestrator, 18-check validation suite. Cross-checks pass to the cent. |
+| Fase 4 — REST API | ✅ Completo | FastAPI + 10 Claude tools, JWT auth, sanitizer, rate limiter, audit trail. 88 tests passing. |
+| Fase 5 — AI agent layer | 🚧 En curso | Per-role system prompts; triage, brand-analyst, store-analyst and what-if agents. |
+| Fase 6 — UI | ⏳ Planificado | Operational console: per-store dashboard, weekly action list, alert drill-down, plan-vs-actual. |
+| Fase 7 — Scale & automation | ⏳ Planificado | Multi-tenant onboarding automation, Redis-backed rate limiter, advanced cost analytics. |
 
 ## Architecture (3-minute version)
 
@@ -46,33 +45,33 @@ upcoming API and AI agents will consume.
 ```
 retail-ai-platform/
 ├── README.md                  -- this file
+├── CHANGELOG.md               -- version history (keepachangelog format)
 ├── LICENSE                    -- MIT
 ├── .gitignore
 ├── sql/
 │   └── gold/                  -- 13 SQL scripts (run in order) + README
 ├── docs/
 │   ├── architecture.md        -- Bronze/Silver/Gold layering + AI tool pattern
-│   ├── data-contract.md       -- source ERP tables consumed
-│   ├── runbook.md             -- how to deploy + run the pipeline
-│   └── discovery/             -- Phases 1-3 reports
-└── api/                       -- placeholder for Phase 4 (REST API)
+│   ├── data-contract.md       -- per-tool API reference (10 tools, inputs/outputs, Gold views)
+│   ├── api-reference.md       -- HTTP endpoint reference (POST /chat, GET /health, error codes)
+│   ├── runbook.md             -- deploy, refresh, add tenant, rotate secrets, investigate
+│   └── discovery/             -- Phases 1-3 reports (ERP reverse engineering)
+└── api/                       -- FastAPI service (Phase 4, complete)
+    ├── README.md              -- quick start, env table, curl examples, CLI, architecture
+    └── app/                   -- source code
 ```
 
 ## What's next
 
-**Phase 4 — REST API.** Expose the Gold views as a tenant-scoped HTTP API
-designed to be consumed both by a UI and by an AI orchestrator using
-function-calling. Each view becomes one or more tool endpoints
-(`get_active_alerts`, `recommend_actions`, `score_sku_coverage`, etc.) with
-explicit input/output JSON schemas suitable for LLM tool definitions.
-
-**Phase 5 — AI agent layer.** Wire a small set of agents on top of the
-tools: a triage agent that surfaces the day's top actions, a brand
+**Phase 5 — AI agent layer 🚧.** Per-role system prompts. Wire specialised agents on top of the
+10 tools: a triage agent that surfaces the day's top actions, a brand
 analyst, a store analyst, and a what-if simulator for pricing and
 transfers.
 
-**Phase 6 — UI.** A focused operational console: per-store dashboard,
+**Phase 6 — UI ⏳.** A focused operational console: per-store dashboard,
 weekly action list, alert drill-down, plan-vs-actual.
+
+**Phase 7 — Scale & automation ⏳.** Multi-tenant onboarding automation, Redis-backed rate limiter for multi-worker deployments, advanced cost and margin analytics.
 
 ## Requirements
 
