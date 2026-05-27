@@ -1,6 +1,6 @@
 # Data contract — API tools
 
-This document is the Phase 4 reference for the ten function-calling tools exposed by `POST /api/v1/chat`. For each tool it lists: required inputs, output fields, which Gold views or tables it queries, a CLI invocation, and an abbreviated example JSON response.
+This document is the Phase 4 reference for the twelve function-calling tools exposed by `POST /api/v1/chat`. For each tool it lists: required inputs, output fields, which Gold views or tables it queries, a CLI invocation, and an abbreviated example JSON response.
 
 For the Phase 3 source ERP tables that feed the Gold layer (the eight `dbo.*` tables), see [discovery/01-erp-discovery.md](discovery/01-erp-discovery.md) and [architecture.md](architecture.md).
 
@@ -18,7 +18,10 @@ For the Phase 3 source ERP tables that feed the Gold layer (the eight `dbo.*` ta
 8. [get_action_recommendations](#8-get_action_recommendations)
 9. [compare_periods](#9-compare_periods)
 10. [get_audit_trail](#10-get_audit_trail)
-11. [Tablas Gold consumidas](#tablas-gold-consumidas)
+11. [get_monthly_summary](#11-get_monthly_summary)
+12. [get_monthly_executive_briefing](#12-get_monthly_executive_briefing)
+13. [Periodicidades soportadas](#periodicidades-soportadas)
+14. [Tablas Gold consumidas](#tablas-gold-consumidas)
 
 ---
 
@@ -610,6 +613,126 @@ python -m app.tools.cli get_audit_trail --tenant 7 --role direccion \
 
 ---
 
+---
+
+## 11. `get_monthly_summary`
+
+Monthly KPI snapshot for a given calendar month. Returns tenant-level (or brand/store-scoped) aggregated sales, month-over-month comparison, top-3 brands, top-3 stores, and current active alert count.
+
+**Required roles**: `direccion`, `marca`
+
+### Inputs
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `year_month` | `string \| null` | `null` | Month in `YYYY-MM` format (e.g. `'2026-04'`). Defaults to latest month with sales data. |
+| `scope` | `string \| null` | `null` | Optional entity filter: `'brand:N'` or `'store:N'`. Default: full tenant. |
+
+### Outputs
+
+| Field | Type | Description |
+|---|---|---|
+| `year_month` | `string` | Month identifier (`YYYY-MM`) |
+| `units_sold` | `float` | Net units sold (SUM across all weeks in the month) |
+| `revenue` | `float` | Net revenue |
+| `cogs` | `float` | Cost of goods sold |
+| `gross_margin` | `float` | Gross margin (revenue − COGS) |
+| `gross_margin_pct` | `float \| null` | Monthly margin % (recalculated from monthly sums) |
+| `discount_amount` | `float` | Total discounts granted |
+| `revenue_prev_month` | `float \| null` | Revenue of the previous calendar month |
+| `revenue_vs_prev_pct` | `float \| null` | MoM revenue change (positive = growth) |
+| `units_vs_prev_pct` | `float \| null` | MoM units change |
+| `top_brands` | `list` | Top-3 brands by revenue: `brand_id`, `brand_name`, `revenue`, `units_sold`, `gross_margin_pct` |
+| `top_stores` | `list` | Top-3 stores by revenue: `store_id`, `store_name`, `revenue`, `units_sold`, `tickets` |
+| `active_alerts_count` | `int` | Total current active alerts (week-based) |
+
+### Gold views consumed
+
+`gold.vw_sales_monthly`, `gold.vw_brand_performance_monthly`, `gold.vw_store_dashboard_monthly`, `gold.vw_active_alerts`
+
+### CLI example
+
+```bash
+python -m app.tools.cli get_monthly_summary --tenant 7 --pretty
+python -m app.tools.cli get_monthly_summary --tenant 7 --year-month 2026-04 --scope brand:5 --pretty
+```
+
+### Example response (abbreviated)
+
+```json
+{
+  "year_month": "2026-04",
+  "units_sold": 18420.0,
+  "revenue": 612000.0,
+  "gross_margin": 158000.0,
+  "gross_margin_pct": 0.258,
+  "revenue_prev_month": 590000.0,
+  "revenue_vs_prev_pct": 0.037,
+  "top_brands": [
+    {"brand_id": 1, "brand_name": "PRO", "revenue": 310000.0, "units_sold": 9200.0, "gross_margin_pct": 0.29}
+  ],
+  "top_stores": [
+    {"store_id": 3, "store_name": "TIENDA CENTRO", "revenue": 220000.0, "tickets": 1840}
+  ],
+  "active_alerts_count": 12
+}
+```
+
+---
+
+## 12. `get_monthly_executive_briefing`
+
+Director-level monthly briefing bundling KPIs, alerts, and brand rankings in a single round-trip. Phase 5 composite-tool preview.
+
+**Required roles**: `direccion`
+
+### Inputs
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `year_month` | `string \| null` | `null` | Month in `YYYY-MM` format. Defaults to latest month with data. |
+
+### Outputs
+
+| Field | Type | Description |
+|---|---|---|
+| `year_month` | `string` | Month identifier |
+| `units_sold`, `revenue`, `cogs`, `gross_margin`, `gross_margin_pct` | `float` | Monthly totals |
+| `discount_amount` | `float` | Total discounts |
+| `revenue_prev_month` | `float \| null` | Previous month revenue |
+| `revenue_vs_prev_pct`, `units_vs_prev_pct` | `float \| null` | Month-over-month deltas |
+| `top_alerts` | `list[3]` | Top-3 alerts by dollar impact: `alert_id`, `alert_type`, `severity`, `estimated_impact_usd` |
+| `top_brands` | `list[5]` | Top-5 brands by monthly revenue: `brand_id`, `brand_name`, `revenue`, `units_sold`, `revenue_vs_plan` |
+
+### Gold views consumed
+
+`gold.vw_sales_monthly`, `gold.vw_brand_performance_monthly`, `gold.vw_active_alerts`
+
+### CLI example
+
+```bash
+python -m app.tools.cli get_monthly_executive_briefing --tenant 7 --pretty
+python -m app.tools.cli get_monthly_executive_briefing --tenant 7 --year-month 2026-04 --pretty
+```
+
+---
+
+## Periodicidades soportadas
+
+| Granularidad | Formato | Soportado | Fuente | Exactitud vs ERP |
+|---|---|---|---|---|
+| Semana ISO | `YYYY-Www` (e.g. `'2026-W21'`) | Sí | `fact_sales_weekly` | Exacta |
+| Mes calendario | `YYYY-MM` (e.g. `'2026-04'`) | Sí (Nivel 1) | `vw_sales_monthly` (derivada) | ~98-100% |
+| Trimestre | — | No | — | — |
+| Año | — | No | — | — |
+| Mes exacto (contable) | — | Nivel 2 (no implementado) | `fact_sales_monthly` (física) | Exacta |
+
+**Nota sobre el Nivel 1 mensual**: Las semanas ISO se asignan al mes de su jueves (regla ISO 8601). Las semanas que cruzan un límite de mes se asignan completas al mes del jueves. Esto produce una discrepancia < 5% vs los totales contables del ERP en meses con semanas cruzadas. Ver [temporal-aggregation-notes.md](temporal-aggregation-notes.md) para detalles.
+
+El parámetro `period_type='month'` en `compare_periods` usa estas mismas vistas mensuales.
+
+---
+
 ## Tablas Gold consumidas
 
 The following Gold objects are queried by the tools above. All are in the `gold` schema of the configured `SQL_DATABASE`.
@@ -624,10 +747,14 @@ The following Gold objects are queried by the tools above. All are in the `gold`
 | `vw_action_recommendation_priority` | View | `get_action_recommendations` |
 | `fact_sales_weekly` | Fact table | `get_executive_summary`, `compare_periods`, `get_sku_detail` |
 | `fact_stock_weekly` | Fact table | `get_sku_detail` (stock by store) |
-| `fact_sales_plan` | Fact table | `get_executive_summary` (plan totals) |
-| `dim_sku` | Dimension | `get_sku_detail` (master fields) |
-| `dim_store` | Dimension | Detokenizer (display names) |
+| `fact_sales_plan` | Fact table | `get_executive_summary`, `vw_brand_performance_monthly` (plan totals) |
+| `dim_sku` | Dimension | `get_sku_detail` (master), `vw_brand_performance_monthly` (brand names) |
+| `dim_store` | Dimension | Detokenizer, `vw_stock_monthly_eom` (tenant-store mapping) |
 | `dim_brand_mapping` | Enrichment | Detokenizer (brand display names) |
+| `vw_sales_monthly` | View (monthly) | `get_monthly_summary`, `get_monthly_executive_briefing`, `compare_periods` (month mode) |
+| `vw_stock_monthly_eom` | View (monthly) | `vw_brand_performance_monthly`, `vw_store_dashboard_monthly` |
+| `vw_brand_performance_monthly` | View (monthly) | `get_monthly_summary`, `get_monthly_executive_briefing` |
+| `vw_store_dashboard_monthly` | View (monthly) | `get_monthly_summary` |
 
 The audit tool reads from `api_audit.ai_audit_log`, which is outside the Gold schema and stores operational metadata rather than analytical data.
 

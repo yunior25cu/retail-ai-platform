@@ -10,6 +10,29 @@ Versions correspond to sub-phases of the project roadmap (Phase 3 = Gold warehou
 
 ---
 
+## [0.4.7] — 2026-05-27
+
+### Added
+- `sql/gold/11_monthly_views.sql` — ISO-based monthly periodicity layer:
+  - `gold.dim_date` extended with two PERSISTED computed columns: `year_month_iso CHAR(7)` (`'2026-05'`) and `month_id_iso INT` (`202605`), both derived from the ISO Thursday-rule (week → month assignment)
+  - `gold.vw_sales_monthly` — monthly aggregation of `fact_sales_weekly` (grain: tenant × month × store × sku × brand); `gross_margin_pct` recalculated from monthly sums; `tickets` SUM is semi-additive (use store dashboard for exact count)
+  - `gold.vw_stock_monthly_eom` — EOM stock snapshot from `dbo.submayor_inventario` (not from `fact_stock_weekly`); uses EOMONTH cutoff; alive-pair dead_threshold 84 days
+  - `gold.vw_brand_performance_monthly` — all months per brand: sales, plan, stock; vs-plan ratios
+  - `gold.vw_store_dashboard_monthly` — all months per store: sales, `COUNT(DISTINCT)` tickets (exact, not semi-additive), EOM stock
+- `app/tools/monthly.py` — new tool `get_monthly_summary`: monthly KPI snapshot + MoM comparison + top-3 brands + top-3 stores + active alert count; roles: `direccion`, `marca`
+- `app/tools/composite.py` — new tool `get_monthly_executive_briefing`: director-level monthly briefing bundling KPIs + alerts + brand ranking in one round-trip; role: `direccion` (Phase 5 preview)
+- `app/db/queries.py` — 5 new fetch functions: `fetch_latest_month`, `fetch_monthly_totals`, `fetch_monthly_brand_performance`, `fetch_monthly_store_dashboard`, `fetch_compare_periods_monthly`
+- `docs/temporal-aggregation-notes.md` — new file documenting ISO week-to-month assignment, expected discrepancy vs ERP accounting totals (< 5%), and the Level 2 upgrade path
+- 25 new tests (113 total): monthly summary, executive briefing, compare monthly mode, SQL aggregation consistency check
+
+### Changed
+- `app/tools/compare.py` — `compare_periods` extended with `period_type: Literal['week', 'month']` (default `'week'`); monthly mode routes to `vw_sales_monthly` with `year_month_iso`; format validation moved to `@model_validator`; backward compatible
+- `app/tools/__init__.py` — `TOOL_REGISTRY` now has 12 tools (added `get_monthly_summary`, `get_monthly_executive_briefing`)
+- `docs/architecture.md` — added monthly views to Gold layer diagram; ISO week-to-month assignment section
+- `docs/data-contract.md` — added "Periodicidades soportadas" section; monthly tool reference
+
+---
+
 ## [0.4.6] — 2026-05-26
 
 ### Added

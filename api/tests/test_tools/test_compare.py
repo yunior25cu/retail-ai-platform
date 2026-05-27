@@ -77,3 +77,100 @@ def test_input_model_rejects_invalid_metric() -> None:
 def test_input_model_rejects_invalid_week_format() -> None:
     with pytest.raises(ValidationError):
         GetComparePeriodsInput(metric="revenue_net", period_a="2026-19", period_b=W_B)
+
+
+# ----------------------------------------------------------------------------
+# Backward-compatibility: no period_type arg → behaves as week
+# ----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_compare_periods_no_period_type_defaults_to_week() -> None:
+    rows = await compare_periods(
+        tenant_id=7, metric="revenue_net", period_a=W_A, period_b=W_B, scope="tenant"
+    )
+    assert len(rows) == 1
+    assert rows[0]["value_a"] > 0
+
+
+# ----------------------------------------------------------------------------
+# Monthly mode tests
+# ----------------------------------------------------------------------------
+M_A = "2026-04"
+M_B = "2026-05"
+
+
+@pytest.mark.asyncio
+async def test_compare_periods_month_tenant_scope_returns_single_row() -> None:
+    rows = await compare_periods(
+        tenant_id=7,
+        metric="revenue_net",
+        period_a=M_A,
+        period_b=M_B,
+        scope="tenant",
+        period_type="month",
+    )
+    assert len(rows) == 1
+    item = ComparePeriodsItem.model_validate(rows[0])
+    assert item.scope_id is None
+    # Both months may have data; at minimum value_a or value_b should be >= 0
+    assert item.value_a >= 0
+    assert item.value_b >= 0
+
+
+@pytest.mark.asyncio
+async def test_compare_periods_month_brand_scope() -> None:
+    rows = await compare_periods(
+        tenant_id=7,
+        metric="units_sold_net",
+        period_a=M_A,
+        period_b=M_B,
+        scope="brand",
+        period_type="month",
+    )
+    assert isinstance(rows, list)
+    for r in rows:
+        ComparePeriodsItem.model_validate(r)
+
+
+@pytest.mark.asyncio
+async def test_compare_periods_month_unknown_tenant_returns_zero() -> None:
+    rows = await compare_periods(
+        tenant_id=99,
+        metric="revenue_net",
+        period_a=M_A,
+        period_b=M_B,
+        scope="tenant",
+        period_type="month",
+    )
+    assert len(rows) == 1
+    assert rows[0]["value_a"] == 0
+    assert rows[0]["value_b"] == 0
+    assert rows[0]["delta_pct"] is None
+
+
+# Input model — monthly format validation
+def test_input_model_accepts_month_format() -> None:
+    inp = GetComparePeriodsInput(
+        period_type="month", metric="revenue_net", period_a="2026-04", period_b="2026-03"
+    )
+    assert inp.period_type == "month"
+    assert inp.period_a == "2026-04"
+
+
+def test_input_model_rejects_week_format_when_period_type_is_month() -> None:
+    with pytest.raises(ValidationError):
+        GetComparePeriodsInput(
+            period_type="month",
+            metric="revenue_net",
+            period_a="2026-W18",
+            period_b="2026-W19",
+        )
+
+
+def test_input_model_rejects_month_format_when_period_type_is_week() -> None:
+    with pytest.raises(ValidationError):
+        GetComparePeriodsInput(
+            period_type="week",
+            metric="revenue_net",
+            period_a="2026-04",
+            period_b="2026-03",
+        )

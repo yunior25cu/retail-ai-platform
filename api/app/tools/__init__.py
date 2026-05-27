@@ -44,6 +44,24 @@ from app.tools.compare import (
 )
 from app.tools.compare import TOOL_DESCRIPTION as COMPARE_DESC
 from app.tools.compare import TOOL_NAME as COMPARE_NAME
+from app.tools.composite import (
+    REQUIRED_ROLES as BRIEFING_ROLES,
+)
+from app.tools.composite import (
+    GetMonthlyExecutiveBriefingInput,
+    get_monthly_executive_briefing,
+)
+from app.tools.composite import TOOL_DESCRIPTION as BRIEFING_DESC
+from app.tools.composite import TOOL_NAME as BRIEFING_NAME
+from app.tools.monthly import (
+    REQUIRED_ROLES as MONTHLY_ROLES,
+)
+from app.tools.monthly import (
+    GetMonthlySummaryInput,
+    get_monthly_summary,
+)
+from app.tools.monthly import TOOL_DESCRIPTION as MONTHLY_DESC
+from app.tools.monthly import TOOL_NAME as MONTHLY_NAME
 from app.tools.executive import (
     GetExecutiveSummaryInput,
     get_executive_summary,
@@ -108,6 +126,8 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     REC_NAME:           _entry(REC_NAME,           REC_DESC,                   get_action_recommendations,  GetActionRecommendationsInput),
     COMPARE_NAME:       _entry(COMPARE_NAME,       COMPARE_DESC,               compare_periods,             GetComparePeriodsInput),
     AUDIT_NAME:         _entry(AUDIT_NAME,         AUDIT_DESC,                 get_audit_trail,             GetAuditTrailInput, required_roles=AUDIT_ROLES),
+    MONTHLY_NAME:       _entry(MONTHLY_NAME,       MONTHLY_DESC,               get_monthly_summary,         GetMonthlySummaryInput, required_roles=MONTHLY_ROLES),
+    BRIEFING_NAME:      _entry(BRIEFING_NAME,      BRIEFING_DESC,              get_monthly_executive_briefing, GetMonthlyExecutiveBriefingInput, required_roles=BRIEFING_ROLES),
 }
 
 

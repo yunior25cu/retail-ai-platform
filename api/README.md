@@ -134,6 +134,33 @@ curl -s -X POST http://localhost:8000/api/v1/chat \
   -d '{"message": "Muéstrame el rendimiento por marca esta semana"}'
 ```
 
+**Monthly summary (latest month)**
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/chat \
+  -H "Content-Type: application/json" \
+  -H "X-Mock-Tenant: 7" \
+  -d '{"message": "Dame el resumen de abril 2026"}' | jq .response
+```
+
+**Monthly period comparison**
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/chat \
+  -H "Content-Type: application/json" \
+  -H "X-Mock-Tenant: 7" \
+  -d '{"message": "Compará abril vs marzo en facturación"}' | jq .response
+```
+
+**Executive monthly briefing (direccion only)**
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/chat \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Necesito el informe ejecutivo de mayo 2026"}' | jq .response
+```
+
 ---
 
 ## CLI tool runner
@@ -167,9 +194,22 @@ python -m app.tools.cli get_velocity_segmentation --tenant 7 --segment A --prett
 # Recommended actions
 python -m app.tools.cli get_action_recommendations --tenant 7 --limit 5 --pretty
 
-# Period comparison
+# Period comparison (weekly — default)
 python -m app.tools.cli compare_periods --tenant 7 \
   --metric revenue_net --period-a 2026-W18 --period-b 2026-W19 --scope brand --pretty
+
+# Period comparison (monthly)
+python -m app.tools.cli compare_periods --tenant 7 \
+  --period-type month --period-a 2026-04 --period-b 2026-03 --metric revenue_net --pretty
+
+# Monthly summary (latest month)
+python -m app.tools.cli get_monthly_summary --tenant 7 --pretty
+
+# Monthly summary (specific month + brand scope)
+python -m app.tools.cli get_monthly_summary --tenant 7 --year-month 2026-04 --scope brand:5 --pretty
+
+# Monthly executive briefing (direccion only)
+python -m app.tools.cli get_monthly_executive_briefing --tenant 7 --role direccion --pretty
 
 # Audit trail (direccion role required)
 python -m app.tools.cli get_audit_trail --tenant 7 --role direccion \
@@ -227,8 +267,10 @@ api/
 │   │   ├── sku.py            -- get_sku_detail + get_sku_coverage_status
 │   │   ├── velocity.py       -- get_velocity_segmentation
 │   │   ├── recommendations.py -- get_action_recommendations
-│   │   ├── compare.py        -- compare_periods
+│   │   ├── compare.py        -- compare_periods (week + month modes)
 │   │   ├── audit.py          -- get_audit_trail (direccion only)
+│   │   ├── monthly.py        -- get_monthly_summary (direccion, marca)
+│   │   ├── composite.py      -- get_monthly_executive_briefing (direccion)
 │   │   └── cli.py            -- python -m app.tools.cli
 │   ├── llm/
 │   │   ├── claude_client.py  -- AsyncAnthropic factory

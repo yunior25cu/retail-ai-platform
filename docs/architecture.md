@@ -39,11 +39,15 @@ only re-derive what the ERP does not expose cleanly.
 │     fact_sales_weekly        fact_stock_weekly  (forward-filled)    │
 │     fact_stock_movements     fact_transfers     fact_sales_plan     │
 │                                                                     │
-│   Analytical views:                                                 │
+│   Analytical views (weekly):                                        │
 │     vw_sku_coverage_status   vw_sku_velocity_segmented              │
 │     vw_store_dashboard       vw_brand_performance                   │
 │     vw_active_alerts         vw_action_recommendation_priority      │
 │     vw_sales_pipeline                                               │
+│                                                                     │
+│   Analytical views (monthly — sub-phase 4.7):                       │
+│     vw_sales_monthly         vw_stock_monthly_eom                   │
+│     vw_brand_performance_monthly  vw_store_dashboard_monthly        │
 │                                                                     │
 │   Cross-cutting:                                                    │
 │     etl_batch_log   etl_data_quality_metrics                        │
@@ -104,3 +108,23 @@ recommend transfers.
 The Gold layer's role is to make sure those tools always return numbers
 that match the operational reality — which is exactly what the
 cross-checks enforce.
+
+## ISO week-to-month assignment (sub-phase 4.7)
+
+The monthly layer assigns every ISO week entirely to the month containing
+its **Thursday** (ISO 8601 rule). This is implemented via two persisted
+computed columns added to `gold.dim_date`:
+
+```sql
+year_month_iso  CHAR(7)  -- '2026-01', computed from DATEADD(day, 4-day_of_week, [date])
+month_id_iso    INT      -- 202601, for fast sort/join
+```
+
+**Implication**: a week that straddles a month boundary (e.g., Mon 29-Dec –
+Sun 4-Jan) is assigned in full to the month of its Thursday. This means
+the Gold monthly totals will **not** coincide exactly with the ERP's
+accounting-period totals in months that contain such cross-boundary weeks.
+The expected discrepancy is < 5% in normal months and < 2% in months where
+only a few days cross over. See
+[docs/temporal-aggregation-notes.md](temporal-aggregation-notes.md) for
+quantification and the Level 2 (physical `fact_sales_monthly`) upgrade path.

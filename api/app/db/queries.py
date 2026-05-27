@@ -429,6 +429,170 @@ async def fetch_compare_periods(
 
 
 # ----------------------------------------------------------------------------
+# Monthly periodicity — vw_sales_monthly / vw_brand_performance_monthly /
+# vw_store_dashboard_monthly  (sub-phase 4.7)
+# ----------------------------------------------------------------------------
+
+async def fetch_latest_month(tenant_id: int) -> str | None:
+    """Return the latest year_month_iso (YYYY-MM) with sales data for the tenant."""
+    rows = await execute_query(
+        "SELECT MAX(year_month_iso) AS m FROM gold.vw_sales_monthly WHERE tenant_id = ?;",
+        (tenant_id,),
+    )
+    return rows[0]["m"] if rows and rows[0]["m"] else None
+
+
+async def fetch_monthly_totals(
+    tenant_id: int,
+    *,
+    year_month: str | None = None,
+    scope_brand_id: int | None = None,
+    scope_store_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Tenant-level (or brand/store-scoped) monthly totals from vw_sales_monthly.
+
+    When year_month is None the latest month is returned.
+    scope_brand_id and scope_store_id are mutually exclusive filters.
+    """
+    if year_month is None:
+        year_month = await fetch_latest_month(tenant_id)
+        if year_month is None:
+            return None
+
+    sql = """
+        SELECT
+            year_month_iso, month_id_iso,
+            SUM(units_sold_net)  AS units_sold,
+            SUM(revenue_net)     AS revenue,
+            SUM(cogs)            AS cogs,
+            SUM(gross_margin)    AS gross_margin,
+            SUM(discount_amount) AS discount_amount,
+            MAX(currency_code)   AS currency_code
+        FROM gold.vw_sales_monthly
+        WHERE tenant_id       = ?
+          AND year_month_iso  = ?
+          AND (? IS NULL OR brand_id = ?)
+          AND (? IS NULL OR store_id = ?)
+        GROUP BY year_month_iso, month_id_iso;
+    """
+    params = (
+        tenant_id, year_month,
+        scope_brand_id, scope_brand_id,
+        scope_store_id, scope_store_id,
+    )
+    rows = await execute_query(sql, params)
+    return rows[0] if rows else None
+
+
+async def fetch_monthly_brand_performance(
+    tenant_id: int,
+    *,
+    brand_id: int | None = None,
+    year_month: str | None = None,
+) -> list[dict[str, Any]]:
+    sql = """
+        SELECT
+            year_month_iso, month_id_iso, brand_id, brand_name,
+            units_sold, revenue, cogs, gross_margin, gross_margin_pct,
+            planned_units, planned_revenue, units_vs_plan_pct, revenue_vs_plan_pct,
+            stock_units, stock_value, skus_count, skus_zero_stock, skus_obsolete
+        FROM gold.vw_brand_performance_monthly
+        WHERE tenant_id = ?
+          AND (? IS NULL OR brand_id       = ?)
+          AND (? IS NULL OR year_month_iso = ?)
+        ORDER BY year_month_iso DESC, revenue DESC, brand_id;
+    """
+    params = (tenant_id, brand_id, brand_id, year_month, year_month)
+    return await execute_query(sql, params)
+
+
+async def fetch_monthly_store_dashboard(
+    tenant_id: int,
+    *,
+    store_id: int | None = None,
+    year_month: str | None = None,
+) -> list[dict[str, Any]]:
+    sql = """
+        SELECT
+            year_month_iso, month_id_iso, store_id, store_code, store_name,
+            block_AB, is_store_flag,
+            units_sold, revenue, cogs, gross_margin, discount_amount,
+            gross_margin_pct, tickets, avg_ticket,
+            stock_units, stock_value, skus_in_store, skus_zero_stock, skus_obsolete
+        FROM gold.vw_store_dashboard_monthly
+        WHERE tenant_id = ?
+          AND (? IS NULL OR store_id      = ?)
+          AND (? IS NULL OR year_month_iso = ?)
+        ORDER BY year_month_iso DESC, revenue DESC, store_id;
+    """
+    params = (tenant_id, store_id, store_id, year_month, year_month)
+    return await execute_query(sql, params)
+
+
+async def fetch_compare_periods_monthly(
+    tenant_id: int,
+    *,
+    metric: str,
+    period_a: str,
+    period_b: str,
+    scope: str = "tenant",
+) -> list[dict[str, Any]]:
+    """Monthly variant of fetch_compare_periods. Queries vw_sales_monthly with
+    year_month_iso as the period column. metric and scope are enum-validated
+    upstream; column name is injected via the same COMPARE_METRICS allowlist."""
+    if metric not in COMPARE_METRICS:
+        raise ValueError(f"metric {metric!r} not in allowlist")
+    if scope not in COMPARE_SCOPES:
+        raise ValueError(f"scope {scope!r} not in allowlist")
+
+    if scope == "tenant":
+        sql = f"""
+            SELECT
+                CAST(NULL AS BIGINT)       AS scope_id,
+                CAST(NULL AS NVARCHAR(120)) AS scope_label,
+                SUM(CASE WHEN year_month_iso = ? THEN {metric} ELSE 0 END) AS value_a,
+                SUM(CASE WHEN year_month_iso = ? THEN {metric} ELSE 0 END) AS value_b
+            FROM gold.vw_sales_monthly
+            WHERE tenant_id = ? AND year_month_iso IN (?, ?);
+        """
+        params = (period_a, period_b, tenant_id, period_a, period_b)
+        return await execute_query(sql, params)
+
+    if scope == "brand":
+        sql = f"""
+            SELECT
+                m.brand_id                 AS scope_id,
+                MAX(ds.brand_name)         AS scope_label,
+                SUM(CASE WHEN m.year_month_iso = ? THEN m.{metric} ELSE 0 END) AS value_a,
+                SUM(CASE WHEN m.year_month_iso = ? THEN m.{metric} ELSE 0 END) AS value_b
+            FROM gold.vw_sales_monthly m
+            LEFT JOIN gold.dim_sku ds
+                ON ds.tenant_id = m.tenant_id AND ds.brand_id = m.brand_id
+               AND ds.is_active = 1
+            WHERE m.tenant_id = ? AND m.year_month_iso IN (?, ?)
+            GROUP BY m.brand_id;
+        """
+        params = (period_a, period_b, tenant_id, period_a, period_b)
+        return await execute_query(sql, params)
+
+    # scope == "store"
+    sql = f"""
+        SELECT
+            m.store_id                 AS scope_id,
+            MAX(ds.store_name)         AS scope_label,
+            SUM(CASE WHEN m.year_month_iso = ? THEN m.{metric} ELSE 0 END) AS value_a,
+            SUM(CASE WHEN m.year_month_iso = ? THEN m.{metric} ELSE 0 END) AS value_b
+        FROM gold.vw_sales_monthly m
+        LEFT JOIN gold.dim_store ds
+            ON ds.tenant_id = m.tenant_id AND ds.store_id = m.store_id
+        WHERE m.tenant_id = ? AND m.year_month_iso IN (?, ?)
+        GROUP BY m.store_id;
+    """
+    params = (period_a, period_b, tenant_id, period_a, period_b)
+    return await execute_query(sql, params)
+
+
+# ----------------------------------------------------------------------------
 # api_audit.ai_audit_log
 # ----------------------------------------------------------------------------
 async def fetch_audit_trail(
