@@ -151,6 +151,124 @@ def _parse_message_rows(rows: Any) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Conversation history — used by GET /internal/conversations endpoints
+# ---------------------------------------------------------------------------
+
+def _extract_title(content_json: str | None, max_len: int = 40) -> str:
+    """Return a display title from the first user message content_json."""
+    if not content_json:
+        return "Nueva conversación"
+    try:
+        parsed = json.loads(content_json)
+        if isinstance(parsed, str):
+            text: str = parsed
+        elif isinstance(parsed, list):
+            text = " ".join(
+                block.get("text", "") for block in parsed
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            text = str(parsed)
+        return text[:max_len] if text.strip() else "Nueva conversación"
+    except (TypeError, json.JSONDecodeError):
+        return "Nueva conversación"
+
+
+def _extract_content_text(content_json: str) -> str:
+    """Flatten content_json to a plain string for history display."""
+    try:
+        parsed = json.loads(content_json)
+        if isinstance(parsed, str):
+            return parsed
+        if isinstance(parsed, list):
+            texts = [
+                block.get("text", "") for block in parsed
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            return "\n".join(t for t in texts if t)
+        return str(parsed)
+    except (TypeError, json.JSONDecodeError):
+        return content_json or ""
+
+
+async def fetch_conversations(
+    tenant_id: int, user_id: int, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Return the most recent *limit* conversations for *user_id* under *tenant_id*.
+
+    Tenant + user isolation enforced via WHERE predicates.
+    """
+    user_id_str = str(user_id)
+    rows = await execute_query(
+        """
+        SELECT TOP (?)
+            CAST(c.conversation_id AS NVARCHAR(50)) AS conversation_id,
+            CONVERT(NVARCHAR(30), ISNULL(c.last_message_at, c.started_at), 127)
+                AS last_message_at,
+            (
+                SELECT COUNT(*)
+                FROM api_audit.conversation_message cm2
+                WHERE cm2.conversation_id = c.conversation_id
+            ) AS message_count,
+            (
+                SELECT TOP 1 cm.content_json
+                FROM api_audit.conversation_message cm
+                WHERE cm.conversation_id = c.conversation_id
+                  AND cm.role = 'user'
+                ORDER BY cm.sequence ASC
+            ) AS first_message_json
+        FROM api_audit.conversation c
+        WHERE c.tenant_id = ?
+          AND c.user_id = ?
+        ORDER BY ISNULL(c.last_message_at, c.started_at) DESC;
+        """,
+        (limit, tenant_id, user_id_str),
+    )
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        result.append({
+            "conversation_id": row["conversation_id"],
+            "title": _extract_title(row.get("first_message_json")),
+            "last_message_at": row["last_message_at"],
+            "message_count": int(row["message_count"] or 0),
+        })
+    return result
+
+
+async def fetch_conversation_messages_for_history(
+    conversation_id: str, tenant_id: int
+) -> list[dict[str, Any]]:
+    """Return all messages for *conversation_id*, validating tenant ownership.
+
+    The INNER JOIN on api_audit.conversation ensures a cross-tenant request
+    returns zero rows (the conversation simply won't match).
+    """
+    rows = await execute_query(
+        """
+        SELECT cm.role, cm.content_json,
+               CONVERT(NVARCHAR(30), cm.created_at, 127) AS created_at
+        FROM api_audit.conversation_message cm
+        INNER JOIN api_audit.conversation c
+            ON c.conversation_id = cm.conversation_id
+           AND c.tenant_id = ?
+        WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
+        ORDER BY cm.sequence ASC;
+        """,
+        (tenant_id, conversation_id),
+    )
+    return [
+        {
+            "role": row["role"],
+            "content": _extract_content_text(row["content_json"]),
+            "tools_used": None,
+            "duration_ms": None,
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Token map (sanitiser)
 # ---------------------------------------------------------------------------
 async def insert_token_mapping(
