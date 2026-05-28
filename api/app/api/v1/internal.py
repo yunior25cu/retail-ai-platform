@@ -241,15 +241,61 @@ async def _persist_failure_audit(
 _SUGGESTIONS_CACHE: dict[str, tuple[float, list[str]]] = {}
 _SUGGESTIONS_TTL = 3600  # seconds
 
-_FALLBACK_SUGGESTIONS = [
-    "¿Cuáles son las alertas más críticas hoy?",
-    "¿Qué tiendas tienen mayor impacto en ventas?",
-    "¿Qué productos necesitan reposición urgente?",
-]
+# Per-role intent descriptions injected into the Claude prompt so the model
+# understands the user's scope, horizon, and what kinds of questions are
+# legitimate for that role. Without this, every role gets nearly identical
+# suggestions because the prompt only had the bare role name.
+_ROLE_INTENT: dict[str, str] = {
+    "direccion":
+        "gerente general que piensa en patrones sistémicos, "
+        "causa raíz y decisiones de política para TODO el negocio, "
+        "con horizonte mensual. NUNCA pregunta cosas operativas "
+        "de una sola tienda ni de un producto puntual.",
+    "marca":
+        "gerente de marca que analiza SU marca a través de todas "
+        "las tiendas, compara contra plan y planifica transferencias "
+        "entre sucursales, con horizonte semanal.",
+    "tienda":
+        "encargado de UNA tienda que necesita saber qué hacer HOY "
+        "en su local: qué reponer, qué transferir, qué liquidar. "
+        "Horizonte diario y operativo, solo su tienda.",
+    "sku":
+        "analista que decide sobre UN producto específico: su "
+        "descuento, su rotación, su cobertura, en qué tienda rota "
+        "mejor. Preguntas puntuales sobre un SKU.",
+}
+
+# Per-role fallback suggestions used when Claude fails or returns <3 lines.
+# A single shared fallback was misleading — "¿Qué tiendas tienen mayor impacto?"
+# is nonsense for a single-store user.
+_FALLBACK_BY_ROLE: dict[str, list[str]] = {
+    "direccion": [
+        "¿Cómo venimos vs plan este mes?",
+        "¿Cuál es la alerta de mayor impacto?",
+        "¿Qué decisión urgente requiere mi atención?",
+    ],
+    "marca": [
+        "¿Qué tiendas rinden bajo el promedio?",
+        "¿Dónde conviene redistribuir mi marca?",
+        "¿Qué productos están sobrestockeados?",
+    ],
+    "tienda": [
+        "¿Qué productos repongo hoy?",
+        "¿Qué transfiero a otras sucursales?",
+        "¿Qué conviene liquidar esta semana?",
+    ],
+    "sku": [
+        "¿Cómo está rotando este producto?",
+        "¿En qué tienda rota mejor este SKU?",
+        "¿Qué descuento acelera su venta?",
+    ],
+}
 
 _SUGGESTIONS_SYSTEM = (
-    "Generá exactamente 3 preguntas cortas (máx 60 chars cada una) que un {role} "
-    "de retail querría preguntar hoy basado en estos datos: {context}. "
+    "Sos un asistente de retail. Generá exactamente 3 preguntas "
+    "cortas (máx 60 chars cada una) que haría un {intent} "
+    "Contexto actual del negocio: {context}. "
+    "Las preguntas DEBEN reflejar el horizonte y alcance descritos. "
     "Solo las 3 preguntas, sin numeración, separadas por newline."
 )
 
@@ -294,8 +340,12 @@ async def get_suggestions(
 async def _generate_suggestions(tenant_id: int, role: str) -> list[str]:
     """Call Claude with a compact alert summary to produce 3 tailored questions.
 
-    Falls back to _FALLBACK_SUGGESTIONS on any error (DB or Anthropic).
+    Falls back to the role-specific list in _FALLBACK_BY_ROLE on any error
+    (DB or Anthropic). Unknown roles default to the 'sku' fallback.
     """
+    intent = _ROLE_INTENT.get(role, _ROLE_INTENT["sku"])
+    role_fallback = _FALLBACK_BY_ROLE.get(role, _FALLBACK_BY_ROLE["sku"])
+
     context = ""
     try:
         alerts = await fetch_active_alerts(tenant_id, limit=3)
@@ -313,7 +363,7 @@ async def _generate_suggestions(tenant_id: int, role: str) -> list[str]:
     if not context:
         context = "sin alertas activas disponibles"
 
-    prompt = _SUGGESTIONS_SYSTEM.format(role=role, context=context)
+    prompt = _SUGGESTIONS_SYSTEM.format(intent=intent, context=context)
     try:
         client = get_client()
         msg = await client.messages.create(
@@ -324,7 +374,7 @@ async def _generate_suggestions(tenant_id: int, role: str) -> list[str]:
         raw = msg.content[0].text if msg.content else ""
         lines = [ln.strip() for ln in raw.split("\n") if ln.strip()][:3]
         if len(lines) < 3:
-            lines = (lines + _FALLBACK_SUGGESTIONS)[:3]
+            lines = (lines + role_fallback)[:3]
         log.info(
             "suggestions.generated",
             tenant_id=tenant_id,
@@ -334,7 +384,7 @@ async def _generate_suggestions(tenant_id: int, role: str) -> list[str]:
         return lines
     except Exception:  # noqa: BLE001
         log.warning("suggestions.claude_failed", tenant_id=tenant_id, role=role)
-        return list(_FALLBACK_SUGGESTIONS)
+        return list(role_fallback)
 
 
 # ---------------------------------------------------------------------------
