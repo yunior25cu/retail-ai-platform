@@ -631,3 +631,100 @@ async def fetch_audit_trail(
     """
     rows = await execute_query(sql, (tenant_id, request_id))
     return rows[0] if rows else None
+
+
+# ----------------------------------------------------------------------------
+# /metrics aggregates (sub-phase 6.6) — fresh data, computed per request.
+# Each helper is a single SQL query; the endpoint composes them and adds the
+# JSON-parsing pass for tools_invoked.
+# ----------------------------------------------------------------------------
+async def fetch_metrics_aggregates(
+    tenant_id: int, period_start: str, period_end: str
+) -> dict[str, Any]:
+    """COUNT/SUM/AVG/COUNT DISTINCT for the [start, end) window."""
+    sql = """
+        SELECT
+            COUNT(*)                                AS total_queries,
+            ISNULL(SUM(CAST(cost_usd AS FLOAT)), 0) AS total_cost_usd,
+            COUNT(DISTINCT user_id)                 AS active_users,
+            ISNULL(AVG(CAST(duration_ms AS FLOAT)), 0) AS avg_duration_ms
+        FROM api_audit.ai_audit_log
+        WHERE tenant_id = ?
+          AND timestamp_utc >= CAST(? AS DATETIME2)
+          AND timestamp_utc <  CAST(? AS DATETIME2)
+          AND status = 'SUCCESS';
+    """
+    rows = await execute_query(sql, (tenant_id, period_start, period_end))
+    return rows[0] if rows else {
+        "total_queries": 0,
+        "total_cost_usd": 0.0,
+        "active_users": 0,
+        "avg_duration_ms": 0.0,
+    }
+
+
+async def fetch_metrics_tools_invoked(
+    tenant_id: int, period_start: str, period_end: str
+) -> list[str]:
+    """Returns the raw tools_invoked JSON strings (one per audit row)."""
+    sql = """
+        SELECT tools_invoked
+        FROM api_audit.ai_audit_log
+        WHERE tenant_id = ?
+          AND timestamp_utc >= CAST(? AS DATETIME2)
+          AND timestamp_utc <  CAST(? AS DATETIME2)
+          AND status = 'SUCCESS'
+          AND tools_invoked IS NOT NULL;
+    """
+    rows = await execute_query(sql, (tenant_id, period_start, period_end))
+    return [r["tools_invoked"] for r in rows if r.get("tools_invoked")]
+
+
+async def fetch_metrics_by_role(
+    tenant_id: int, period_start: str, period_end: str
+) -> list[dict[str, Any]]:
+    sql = """
+        SELECT user_role, COUNT(*) AS cnt
+        FROM api_audit.ai_audit_log
+        WHERE tenant_id = ?
+          AND timestamp_utc >= CAST(? AS DATETIME2)
+          AND timestamp_utc <  CAST(? AS DATETIME2)
+          AND status = 'SUCCESS'
+        GROUP BY user_role;
+    """
+    return await execute_query(sql, (tenant_id, period_start, period_end))
+
+
+async def fetch_metrics_by_day(
+    tenant_id: int, period_start: str, period_end: str
+) -> list[dict[str, Any]]:
+    sql = """
+        SELECT CONVERT(NVARCHAR(10), timestamp_utc, 23) AS [date], COUNT(*) AS cnt
+        FROM api_audit.ai_audit_log
+        WHERE tenant_id = ?
+          AND timestamp_utc >= CAST(? AS DATETIME2)
+          AND timestamp_utc <  CAST(? AS DATETIME2)
+          AND status = 'SUCCESS'
+        GROUP BY CONVERT(NVARCHAR(10), timestamp_utc, 23)
+        ORDER BY [date];
+    """
+    return await execute_query(sql, (tenant_id, period_start, period_end))
+
+
+async def fetch_metrics_longest_conversation_turns(
+    tenant_id: int, period_start: str, period_end: str
+) -> int:
+    """Max chat turns (audit rows) per conversation within the window."""
+    sql = """
+        SELECT TOP 1 COUNT(*) AS turns
+        FROM api_audit.ai_audit_log
+        WHERE tenant_id = ?
+          AND timestamp_utc >= CAST(? AS DATETIME2)
+          AND timestamp_utc <  CAST(? AS DATETIME2)
+          AND status = 'SUCCESS'
+          AND conversation_id IS NOT NULL
+        GROUP BY conversation_id
+        ORDER BY turns DESC;
+    """
+    rows = await execute_query(sql, (tenant_id, period_start, period_end))
+    return int(rows[0]["turns"]) if rows else 0

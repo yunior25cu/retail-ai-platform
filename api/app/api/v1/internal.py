@@ -11,8 +11,11 @@ either from the X-Conversation-Id header (priority) or the request body.
 
 from __future__ import annotations
 
+import json
 import time
-from typing import Annotated
+from collections import Counter
+from datetime import datetime, timezone
+from typing import Annotated, Any
 from uuid import uuid4
 
 import structlog
@@ -32,7 +35,14 @@ from app.db.conversation import (
 )
 from app.db.conversation import fetch_conversation_messages_for_history, fetch_conversations
 from app.db.feedback import insert_feedback
-from app.db.queries import fetch_active_alerts
+from app.db.queries import (
+    fetch_active_alerts,
+    fetch_metrics_aggregates,
+    fetch_metrics_by_day,
+    fetch_metrics_by_role,
+    fetch_metrics_longest_conversation_turns,
+    fetch_metrics_tools_invoked,
+)
 from app.llm.claude_client import get_client
 from app.llm.orchestrator import run_conversation
 from app.llm.prompts import select_prompt
@@ -518,3 +528,116 @@ async def submit_feedback(
         rating=payload.rating,
     )
     return FeedbackResponse(ok=True)
+
+
+# ---------------------------------------------------------------------------
+# GET /metrics — director-only usage panel (sub-phase 6.6)
+# ---------------------------------------------------------------------------
+
+_METRICS_CACHE: dict[int, tuple[float, "MetricsResponse"]] = {}
+_METRICS_TTL = 300  # 5 minutes — fresh enough to feel live, cheap enough to skip the DB hammer.
+
+
+class MetricsResponse(BaseModel):
+    period: str = Field(description="ISO month: 'YYYY-MM'.")
+    total_queries: int
+    total_cost_usd: float
+    active_users: int
+    top_tool: str
+    top_tool_count: int
+    longest_conversation_turns: int
+    avg_duration_ms: int
+    queries_by_role: dict[str, int]
+    queries_by_day: list[dict[str, Any]]
+
+
+def _current_month_window() -> tuple[str, str, str]:
+    """Returns (period_label, start_iso, end_iso) for the current UTC month."""
+    now = datetime.now(timezone.utc)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    period = now.strftime("%Y-%m")
+    return period, start.isoformat(), end.isoformat()
+
+
+def _top_tool_from_invocations(raw_json_rows: list[str]) -> tuple[str, int]:
+    """Parses each tools_invoked JSON array and counts tool names across all rows."""
+    counter: Counter[str] = Counter()
+    for raw in raw_json_rows:
+        try:
+            tools = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(tools, list):
+            continue
+        for entry in tools:
+            # Each entry can be a string name or a dict with 'name' (the audit
+            # writer has used both shapes across releases). Handle both.
+            if isinstance(entry, str):
+                counter[entry] += 1
+            elif isinstance(entry, dict):
+                name = entry.get("name") or entry.get("tool")
+                if isinstance(name, str):
+                    counter[name] += 1
+    if not counter:
+        return "", 0
+    name, count = counter.most_common(1)[0]
+    return name, count
+
+
+@router.get(
+    "/metrics",
+    response_model=MetricsResponse,
+    summary="Tenant usage metrics for the current UTC month",
+    description=(
+        "Aggregated AI Assistant usage for the caller's tenant: query counts, "
+        "cost, active users, top tool, queries by role and by day. Cached "
+        "in-process for 5 minutes. Authorization at the .NET layer restricts "
+        "this endpoint to users with the ai.assistant.director capability."
+    ),
+    responses={
+        401: {"description": "Missing or invalid X-Service-Key"},
+        400: {"description": "Missing X-Tenant-Id"},
+        503: {"description": "SERVICE_KEY not configured"},
+    },
+)
+async def get_metrics(
+    svc: Annotated[ServiceAuthContext, Depends(get_service_auth_context)],
+) -> MetricsResponse:
+    now = time.time()
+    cached = _METRICS_CACHE.get(svc.tenant_id)
+    if cached and (now - cached[0]) < _METRICS_TTL:
+        log.info("metrics.cache_hit", tenant_id=svc.tenant_id)
+        return cached[1]
+
+    period, start_iso, end_iso = _current_month_window()
+    aggs = await fetch_metrics_aggregates(svc.tenant_id, start_iso, end_iso)
+    tool_jsons = await fetch_metrics_tools_invoked(svc.tenant_id, start_iso, end_iso)
+    by_role_rows = await fetch_metrics_by_role(svc.tenant_id, start_iso, end_iso)
+    by_day_rows = await fetch_metrics_by_day(svc.tenant_id, start_iso, end_iso)
+    longest = await fetch_metrics_longest_conversation_turns(
+        svc.tenant_id, start_iso, end_iso
+    )
+
+    top_tool, top_tool_count = _top_tool_from_invocations(tool_jsons)
+
+    response = MetricsResponse(
+        period=period,
+        total_queries=int(aggs["total_queries"] or 0),
+        total_cost_usd=round(float(aggs["total_cost_usd"] or 0.0), 4),
+        active_users=int(aggs["active_users"] or 0),
+        top_tool=top_tool,
+        top_tool_count=top_tool_count,
+        longest_conversation_turns=longest,
+        avg_duration_ms=int(aggs["avg_duration_ms"] or 0),
+        queries_by_role={r["user_role"]: int(r["cnt"]) for r in by_role_rows},
+        queries_by_day=[
+            {"date": r["date"], "count": int(r["cnt"])} for r in by_day_rows
+        ],
+    )
+
+    _METRICS_CACHE[svc.tenant_id] = (now, response)
+    return response
