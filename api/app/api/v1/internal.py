@@ -43,6 +43,11 @@ from app.db.queries import (
     fetch_metrics_longest_conversation_turns,
     fetch_metrics_tools_invoked,
 )
+from app.db.tenant_config import (
+    get_monthly_spend_usd,
+    get_tenant_config,
+    update_tenant_config,
+)
 from app.llm.claude_client import get_client
 from app.llm.orchestrator import run_conversation
 from app.llm.prompts import select_prompt
@@ -108,9 +113,37 @@ async def internal_chat(
         role=svc.role,
     )
 
-    # Rate limiting — same buckets as /chat
+    # Per-tenant configuration (cached 5 min). Memory turns, per-role rate
+    # limit and monthly budget are all derived from this single read.
+    cfg = await get_tenant_config(auth.tenant_id)
+
+    # Monthly budget gate — 0 means unlimited. Check BEFORE the limiter so
+    # an over-budget tenant gets a clear domain error, not a generic 429.
+    if cfg.monthly_budget_usd > 0:
+        spent = await get_monthly_spend_usd(auth.tenant_id)
+        if spent >= cfg.monthly_budget_usd:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "scope": "budget",
+                    "error": "BUDGET_EXCEEDED",
+                    "message": (
+                        "El presupuesto mensual del asistente fue alcanzado. "
+                        "Contactá al administrador."
+                    ),
+                    "spent_usd": round(spent, 4),
+                    "budget_usd": cfg.monthly_budget_usd,
+                },
+            )
+
+    # Rate limiting — tenant cap unchanged; per-user cap now comes from
+    # the per-role config (cfg.rate_limit_for_role).
     try:
-        limiter.check_and_record_request(auth.tenant_id, auth.user_id)
+        limiter.check_and_record_request(
+            auth.tenant_id,
+            auth.user_id,
+            user_per_hour_override=cfg.rate_limit_for_role(auth.role),
+        )
         limiter.check_token_budget(auth.tenant_id)
     except RateLimitExceeded as e:
         raise HTTPException(
@@ -124,7 +157,9 @@ async def internal_chat(
     conv_requested = svc.conversation_id or payload.conversation_id
     conv_id = await _resolve_conversation(conv_requested, auth)
 
-    history = await load_recent_messages(conv_id, tenant_id=auth.tenant_id)
+    history = await load_recent_messages(
+        conv_id, tenant_id=auth.tenant_id, turns=cfg.memory_turns,
+    )
     sanitizer = Sanitizer()
 
     try:
@@ -335,6 +370,17 @@ class SuggestionsResponse(BaseModel):
 async def get_suggestions(
     svc: Annotated[ServiceAuthContext, Depends(get_service_auth_context)],
 ) -> SuggestionsResponse:
+    # Tenant-level kill switch: when suggestions_enabled = false we skip
+    # both the Claude call AND the cache lookup, returning the role-specific
+    # static fallback. The cache is by-passed deliberately — a tenant that
+    # re-enables the toggle should see fresh, generated suggestions on the
+    # next request, not whatever happened to be cached.
+    cfg = await get_tenant_config(svc.tenant_id)
+    if not cfg.suggestions_enabled:
+        log.info("suggestions.disabled", tenant_id=svc.tenant_id, role=svc.role)
+        fallback = _FALLBACK_BY_ROLE.get(svc.role, _FALLBACK_BY_ROLE["sku"])
+        return SuggestionsResponse(suggestions=list(fallback))
+
     cache_key = f"{svc.tenant_id}:{svc.role}"
     now = time.time()
     cached = _SUGGESTIONS_CACHE.get(cache_key)
@@ -641,3 +687,131 @@ async def get_metrics(
 
     _METRICS_CACHE[svc.tenant_id] = (now, response)
     return response
+
+
+# ---------------------------------------------------------------------------
+# /config — director-only tenant settings (sub-phase 6.7)
+# ---------------------------------------------------------------------------
+
+_ALLOWED_MEMORY_TURNS = frozenset({3, 5, 10})
+_ALLOWED_BUDGET_ALERT_PCT = frozenset({50, 80, 100})
+_RATE_LIMIT_MIN = 1
+_RATE_LIMIT_MAX = 200
+_RATE_LIMIT_KEYS = frozenset(
+    {"rate_limit_director", "rate_limit_marca",
+     "rate_limit_tienda", "rate_limit_producto"}
+)
+
+
+class TenantConfigResponse(BaseModel):
+    memory_turns: int
+    monthly_budget_usd: float
+    budget_alert_pct: int
+    rate_limit_director: int
+    rate_limit_marca: int
+    rate_limit_tienda: int
+    rate_limit_producto: int
+    suggestions_enabled: bool
+    current_spend_usd: float = Field(
+        description="Sum of cost_usd for SUCCESS audit rows in the current "
+                    "UTC month. Used by the UI to render the spend bar."
+    )
+
+
+class UpdateConfigRequest(BaseModel):
+    key: str
+    value: str
+
+
+def _validate_config_value(key: str, value: str) -> None:
+    """Raise HTTPException(422) on invalid value for ``key``. The PATCH
+    handler is the only place that rejects bad input — the underlying
+    update_tenant_config helper trusts its caller."""
+    try:
+        if key == "memory_turns":
+            if int(value) not in _ALLOWED_MEMORY_TURNS:
+                raise ValueError
+        elif key == "monthly_budget_usd":
+            if float(value) < 0:
+                raise ValueError
+        elif key == "budget_alert_pct":
+            if int(value) not in _ALLOWED_BUDGET_ALERT_PCT:
+                raise ValueError
+        elif key in _RATE_LIMIT_KEYS:
+            v = int(value)
+            if not (_RATE_LIMIT_MIN <= v <= _RATE_LIMIT_MAX):
+                raise ValueError
+        elif key == "suggestions_enabled":
+            if value.lower() not in ("true", "false"):
+                raise ValueError
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"config_key '{key}' no permitida",
+            )
+    except (TypeError, ValueError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Valor inválido para '{key}': {value!r}",
+        ) from e
+
+
+@router.get(
+    "/config",
+    response_model=TenantConfigResponse,
+    summary="Tenant AI settings (director-only at the .NET layer)",
+)
+async def get_config(
+    svc: Annotated[ServiceAuthContext, Depends(get_service_auth_context)],
+) -> TenantConfigResponse:
+    cfg = await get_tenant_config(svc.tenant_id)
+    spent = await get_monthly_spend_usd(svc.tenant_id)
+    return TenantConfigResponse(
+        memory_turns=cfg.memory_turns,
+        monthly_budget_usd=cfg.monthly_budget_usd,
+        budget_alert_pct=cfg.budget_alert_pct,
+        rate_limit_director=cfg.rate_limit_director,
+        rate_limit_marca=cfg.rate_limit_marca,
+        rate_limit_tienda=cfg.rate_limit_tienda,
+        rate_limit_producto=cfg.rate_limit_producto,
+        suggestions_enabled=cfg.suggestions_enabled,
+        current_spend_usd=round(spent, 4),
+    )
+
+
+@router.put(
+    "/config",
+    response_model=dict[str, Any],
+    summary="Update one tenant AI setting",
+    description=(
+        "Single-key update. Validates value shape against the key's "
+        "constraints (memory_turns ∈ {3,5,10}, budget_alert_pct ∈ "
+        "{50,80,100}, rate_limit_* ∈ [1,200], suggestions_enabled ∈ "
+        "{true,false}, monthly_budget_usd ≥ 0)."
+    ),
+)
+async def update_config(
+    payload: UpdateConfigRequest,
+    svc: Annotated[ServiceAuthContext, Depends(get_service_auth_context)],
+) -> dict[str, Any]:
+    _validate_config_value(payload.key, payload.value)
+    try:
+        await update_tenant_config(
+            tenant_id=svc.tenant_id,
+            key=payload.key,
+            value=payload.value,
+            updated_by=svc.user_id,
+        )
+    except ValueError as e:
+        # update_tenant_config raises on unknown keys, but _validate_config_value
+        # should have caught those first. Mirror the validator's HTTP shape so
+        # the .NET proxy maps it consistently.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        ) from e
+    log.info(
+        "config.updated",
+        tenant_id=svc.tenant_id, key=payload.key, value=payload.value,
+    )
+    return {"ok": True, "key": payload.key, "value": payload.value}

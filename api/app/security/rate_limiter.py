@@ -57,12 +57,26 @@ class RateLimiter:
 
     # ---------- Public API ----------
 
-    def check_and_record_request(self, tenant_id: int, user_id: str) -> None:
+    def check_and_record_request(
+        self,
+        tenant_id: int,
+        user_id: str,
+        user_per_hour_override: int | None = None,
+    ) -> None:
         """Check both tenant- and user-level quotas; record a hit if allowed.
+
+        ``user_per_hour_override`` lets the caller substitute the per-user
+        cap for this single call (used by per-tenant per-role config in
+        sub-phase 6.7). The tenant cap and token budget are unaffected.
 
         Raises ``RateLimitExceeded`` with ``scope`` of ``tenant`` or ``user``
         when a quota is breached.
         """
+        effective_user_cap = (
+            user_per_hour_override
+            if user_per_hour_override is not None
+            else self.user_per_hour
+        )
         now = time.monotonic()
         with self._lock:
             t_hits = self._tenant_hits[tenant_id]
@@ -75,10 +89,10 @@ class RateLimiter:
                     "tenant",
                     f"tenant {tenant_id} exceeded {self.tenant_per_hour}/h",
                 )
-            if len(u_hits) >= self.user_per_hour:
+            if len(u_hits) >= effective_user_cap:
                 raise RateLimitExceeded(
                     "user",
-                    f"user {user_id} exceeded {self.user_per_hour}/h",
+                    f"user {user_id} exceeded {effective_user_cap}/h",
                 )
             t_hits.append(now)
             u_hits.append(now)
