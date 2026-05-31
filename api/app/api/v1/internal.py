@@ -399,14 +399,14 @@ async def get_suggestions(
         fallback = _FALLBACK_BY_ROLE.get(svc.role, _FALLBACK_BY_ROLE["sku"])
         return SuggestionsResponse(suggestions=list(fallback))
 
-    cache_key = f"{svc.tenant_id}:{svc.role}"
+    cache_key = f"{svc.tenant_id}:{svc.role}:{cfg.vertical}"
     now = time.time()
     cached = _SUGGESTIONS_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _SUGGESTIONS_TTL:
         log.info("suggestions.cache_hit", tenant_id=svc.tenant_id, role=svc.role)
         return SuggestionsResponse(suggestions=cached[1])
 
-    suggestions = await _generate_suggestions(svc.tenant_id, svc.role)
+    suggestions = await _generate_suggestions(svc.tenant_id, svc.role, vertical=cfg.vertical)
     _SUGGESTIONS_CACHE[cache_key] = (now, suggestions)
     return SuggestionsResponse(suggestions=suggestions)
 
@@ -445,17 +445,20 @@ async def _fetch_production_context(tenant_id: int) -> str:
     return "sin productos críticos activos"
 
 
-async def _generate_suggestions(tenant_id: int, role: str) -> list[str]:
+async def _generate_suggestions(
+    tenant_id: int, role: str, vertical: str = "retail"
+) -> list[str]:
     """Call Claude with a compact context summary to produce 3 tailored questions.
 
-    Falls back to the role-specific list in _FALLBACK_BY_ROLE on any error
-    (DB or Anthropic). Unknown roles default to the 'sku' fallback.
+    The vertical (tenant-level) determines the data source and prompt template.
+    The role determines the intent description within that vertical.
+    Falls back to the role-specific list in _FALLBACK_BY_ROLE on any error.
     """
-    intent = _ROLE_INTENT.get(role, _ROLE_INTENT["sku"])
-    role_fallback = _FALLBACK_BY_ROLE.get(role, _FALLBACK_BY_ROLE["sku"])
+    intent = _ROLE_INTENT.get(role, _ROLE_INTENT.get("produccion" if vertical == "produccion" else "sku", ""))
+    role_fallback = _FALLBACK_BY_ROLE.get(role, _FALLBACK_BY_ROLE.get("produccion" if vertical == "produccion" else "sku", []))
 
     context = ""
-    if role == "produccion":
+    if vertical == "produccion":              # ← discrimina por VERTICAL del tenant
         context = await _fetch_production_context(tenant_id)
         sys_tpl = _SUGGESTIONS_SYSTEM_PRODUCCION
     else:

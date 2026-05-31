@@ -32,6 +32,7 @@ from app.db.conversation import (
     load_recent_messages,
     touch_conversation,
 )
+from app.db.tenant_config import get_tenant_config
 from app.llm.orchestrator import run_conversation
 from app.llm.prompts import select_prompt
 from app.security.rate_limiter import RateLimitExceeded, limiter
@@ -145,8 +146,11 @@ async def chat(
             detail={"scope": e.scope, "message": e.detail},
         ) from e
 
-    # Select role-specific system prompt once; used in orchestrator + audit row.
-    system_prompt = select_prompt(auth.role)
+    # Tenant config: resolves vertical ('retail'|'produccion'|...) and budget.
+    cfg = await get_tenant_config(auth.tenant_id)
+
+    # Select prompt by vertical first, then role within that vertical.
+    system_prompt = select_prompt(auth.role, vertical=cfg.vertical)
 
     # 2. Conversation (create or load tenant-scoped)
     conv_id = await _resolve_conversation(payload.conversation_id, auth)
@@ -166,6 +170,7 @@ async def chat(
             system_prompt=system_prompt,
             sanitizer=sanitizer,
             conversation_id=conv_id,
+            vertical=cfg.vertical,
         )
     except RuntimeError as e:
         # Config error (ANTHROPIC_API_KEY missing, etc.)

@@ -147,6 +147,7 @@ def _entry(
     input_model: type,
     required_roles: list[str] | None = None,
     is_composite: bool = False,
+    vertical: str = "retail",
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "fn": fn,
@@ -154,6 +155,7 @@ def _entry(
         "description": description,
         "anthropic": pydantic_to_anthropic_tool(name, description, input_model),
         "is_composite": is_composite,
+        "vertical": vertical,
     }
     if required_roles:
         entry["required_roles"] = required_roles
@@ -176,26 +178,35 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     TOOL_NAME_EXEC_WEEKLY: _entry(TOOL_NAME_EXEC_WEEKLY, TOOL_DESCRIPTION_EXEC_WEEKLY, get_executive_weekly_briefing,     GetExecutiveWeeklyBriefingInput,         required_roles=REQUIRED_ROLES_EXEC_WEEKLY, is_composite=True),
     TOOL_NAME_STORE_DAILY: _entry(TOOL_NAME_STORE_DAILY, TOOL_DESCRIPTION_STORE_DAILY, get_store_daily_briefing,          GetStoreDailyBriefingInput,              required_roles=REQUIRED_ROLES_STORE_DAILY, is_composite=True),
     TOOL_NAME_BRAND_WEEKLY:_entry(TOOL_NAME_BRAND_WEEKLY,TOOL_DESCRIPTION_BRAND_WEEKLY,get_brand_weekly_review,           GetBrandWeeklyReviewInput,               required_roles=REQUIRED_ROLES_BRAND_WEEKLY, is_composite=True),
-    # ── Módulo de producción Prolimpio ────────────────────────────────────────
-    TOOL_NAME_FORECAST:    _entry(TOOL_NAME_FORECAST,    TOOL_DESC_FORECAST,    get_production_forecast,    GetProductionForecastInput),
-    TOOL_NAME_REQUIREMENTS:_entry(TOOL_NAME_REQUIREMENTS,TOOL_DESC_REQUIREMENTS,get_component_requirements, GetComponentRequirementsInput),
-    TOOL_NAME_REACTOR:     _entry(TOOL_NAME_REACTOR,     TOOL_DESC_REACTOR,     get_reactor_schedule,       GetReactorScheduleInput),
-    TOOL_NAME_COVERAGE:    _entry(TOOL_NAME_COVERAGE,    TOOL_DESC_COVERAGE,    get_coverage_alert,         GetCoverageAlertInput),
-    TOOL_NAME_COMP_STOCK:  _entry(TOOL_NAME_COMP_STOCK,  TOOL_DESC_COMP_STOCK,  get_component_stock,        GetComponentStockInput),
-    TOOL_NAME_HISTORY:     _entry(TOOL_NAME_HISTORY,     TOOL_DESC_HISTORY,     get_production_history,     GetProductionHistoryInput),
+    # ── Módulo de producción (vertical='produccion') ──────────────────────────
+    TOOL_NAME_FORECAST:    _entry(TOOL_NAME_FORECAST,    TOOL_DESC_FORECAST,    get_production_forecast,    GetProductionForecastInput,    vertical="produccion"),
+    TOOL_NAME_REQUIREMENTS:_entry(TOOL_NAME_REQUIREMENTS,TOOL_DESC_REQUIREMENTS,get_component_requirements, GetComponentRequirementsInput,  vertical="produccion"),
+    TOOL_NAME_REACTOR:     _entry(TOOL_NAME_REACTOR,     TOOL_DESC_REACTOR,     get_reactor_schedule,       GetReactorScheduleInput,        vertical="produccion"),
+    TOOL_NAME_COVERAGE:    _entry(TOOL_NAME_COVERAGE,    TOOL_DESC_COVERAGE,    get_coverage_alert,         GetCoverageAlertInput,          vertical="produccion"),
+    TOOL_NAME_COMP_STOCK:  _entry(TOOL_NAME_COMP_STOCK,  TOOL_DESC_COMP_STOCK,  get_component_stock,        GetComponentStockInput,         vertical="produccion"),
+    TOOL_NAME_HISTORY:     _entry(TOOL_NAME_HISTORY,     TOOL_DESC_HISTORY,     get_production_history,     GetProductionHistoryInput,      vertical="produccion"),
 }
 
 
-def anthropic_tools(role: str | None = None) -> list[dict[str, Any]]:
-    """List of Anthropic tool definitions, filtered by role when provided.
+def anthropic_tools(
+    role: str | None = None,
+    vertical: str = "retail",
+) -> list[dict[str, Any]]:
+    """List of Anthropic tool definitions, filtered by vertical then by role.
 
-    If ``role`` is None all tools (including role-restricted) are returned —
-    intended for testing / introspection only. The orchestrator passes the
-    real role so the LLM never sees tools it cannot call.
+    ``vertical`` is the tenant-level attribute ('retail' | 'produccion' | ...).
+    Only tools tagged with the matching vertical are returned, then further
+    filtered by ``required_roles`` within that vertical.
+
+    If ``role`` is None all tools for that vertical are returned — intended
+    for testing / introspection only.
     """
     out: list[dict[str, Any]] = []
     norm = (role or "").lower()
     for entry in TOOL_REGISTRY.values():
+        # Hard-exclude tools that belong to a different vertical.
+        if entry.get("vertical", "retail") != vertical:
+            continue
         required = entry.get("required_roles")
         if required and role is not None and norm not in {r.lower() for r in required}:
             continue

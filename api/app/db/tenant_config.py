@@ -29,6 +29,7 @@ _VALID_KEYS = frozenset(
         "rate_limit_producto",
         "rate_limit_produccion",
         "suggestions_enabled",
+        "vertical",             # 'retail' | 'produccion' | extensible
     }
 )
 
@@ -50,6 +51,7 @@ class TenantConfig:
     rate_limit_producto: int = 15
     rate_limit_produccion: int = 30
     suggestions_enabled: bool = True
+    vertical: str = "retail"          # 'retail' | 'produccion' | extensible
 
     def rate_limit_for_role(self, role: str) -> int:
         """Returns the per-hour cap for a Python role string."""
@@ -89,6 +91,8 @@ def _apply_row(cfg: TenantConfig, key: str, value: str) -> None:
             cfg.rate_limit_producto = int(value)
         elif key == "rate_limit_produccion":
             cfg.rate_limit_produccion = int(value)
+        elif key == "vertical":
+            cfg.vertical = value.lower().strip()
         elif key == "suggestions_enabled":
             cfg.suggestions_enabled = value.lower() == "true"
     except (TypeError, ValueError):

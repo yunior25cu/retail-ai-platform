@@ -69,6 +69,7 @@ async def run_conversation(
     max_iterations: int = MAX_ITERATIONS,
     sanitizer: Sanitizer | None = None,
     conversation_id: str | None = None,
+    vertical: str = "retail",
 ) -> ConversationResult:
     """Run one turn of the conversation through Claude with tool calling.
 
@@ -76,21 +77,20 @@ async def run_conversation(
         user_message: the user's natural-language input for this turn.
         auth: trusted identity from the FastAPI dependency. The orchestrator
             forwards ``auth.tenant_id`` to every tool call.
-        history: optional list of prior Anthropic messages. Stateless for 4.3
-            (client passes the history back); persistence arrives in 4.5.
-        client: optional injected client (used by tests; production calls
-            ``get_client()``).
-        system_prompt: override the default system prompt. Phase 5 will pick
-            per-role prompts.
+        history: optional list of prior Anthropic messages.
+        client: optional injected client (used by tests).
+        system_prompt: system prompt already resolved by the caller.
         max_iterations: hard cap on tool-use cycles before forcing a stop.
+        vertical: tenant-level attribute ('retail' | 'produccion' | ...).
+            Controls which tools are visible to Claude.
     """
     t0 = time.perf_counter()
     result = ConversationResult(request_id=str(uuid4()))
 
     client = client or get_client()
     system_prompt = system_prompt or GENERIC_SYSTEM_PROMPT
-    # Filter by role so the LLM never sees tools it cannot call.
-    tools = anthropic_tools(role=auth.role)
+    # Filter by vertical first, then by role within that vertical.
+    tools = anthropic_tools(role=auth.role, vertical=vertical)
 
     messages: list[dict[str, Any]] = list(history or [])
     messages.append({"role": "user", "content": user_message})
