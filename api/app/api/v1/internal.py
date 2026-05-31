@@ -151,7 +151,7 @@ async def internal_chat(
             detail={"scope": e.scope, "message": e.detail},
         ) from e
 
-    system_prompt = select_prompt(auth.role)
+    system_prompt = select_prompt(auth.role, vertical=cfg.vertical)
 
     # Conversation: X-Conversation-Id header takes priority over body field
     conv_requested = svc.conversation_id or payload.conversation_id
@@ -170,6 +170,7 @@ async def internal_chat(
             system_prompt=system_prompt,
             sanitizer=sanitizer,
             conversation_id=conv_id,
+            vertical=cfg.vertical,
         )
     except RuntimeError as e:
         duration = int((time.perf_counter() - t0) * 1000)
