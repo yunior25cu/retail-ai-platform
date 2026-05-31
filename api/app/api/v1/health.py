@@ -23,7 +23,7 @@ class HealthResponse(BaseModel):
                 {
                     "status": "ok",
                     "db_ok": True,
-                    "db_database": "pymeconta_local",
+                    "db_database": settings.sql_database,
                     "tenant_count": 12,
                 }
             ]

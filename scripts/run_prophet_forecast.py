@@ -30,15 +30,23 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Conexiones ────────────────────────────────────────────────────────────────
+import os as _os
+
+# Macrosoft: conexión del cliente — sigue como configuración local de Prolimpio
 MACROSOFT_CONN = (
     "DRIVER={ODBC Driver 17 for SQL Server};"
     "SERVER=192.168.20.42;DATABASE=GestionProlimpio;"
     "UID=consulta;PWD=consulta;"
 )
+
+# Gold DB: lee de variables de entorno; los mismos nombres que api/.env
 GOLD_CONN = (
     "DRIVER={ODBC Driver 17 for SQL Server};"
-    "SERVER=.\\SQLEXPRESS;DATABASE=pymeconta_local;"
-    "Trusted_Connection=yes;"
+    f"SERVER={_os.getenv('SQL_SERVER', r'.\SQLEXPRESS')};"
+    f"DATABASE={_os.getenv('SQL_DATABASE', 'pymeconta_local')};"
+    f"UID={_os.getenv('SQL_USER', 'sa')};"
+    f"PWD={_os.getenv('SQL_PASSWORD', '')};"
+    "TrustServerCertificate=yes;Encrypt=no;"
 )
 
 # ── Query de ventas históricas — MODO CSV Bridge ──────────────────────────────

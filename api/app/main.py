@@ -47,7 +47,12 @@ log = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise resources on startup, dispose on shutdown."""
-    log.info("api.startup", database=settings.sql_database, server=settings.sql_server)
+    log.info(
+        "api.startup",
+        environment=settings.environment,
+        gold_db_host=settings.sql_server,
+        gold_db_name=settings.sql_database,
+    )
     pool.initialize()
     try:
         yield
@@ -58,7 +63,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Retail AI Platform — API",
-    version="0.4.6",
+    version="0.8.0",
     description=(
         "Multi-tenant conversational analytics API. "
         "Exposes ten Gold data warehouse tools (alerts, dashboards, SKU analysis, "
