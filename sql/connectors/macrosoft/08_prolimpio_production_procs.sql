@@ -16,8 +16,9 @@
 
 -- ────────────────────────────────────────────────────────────
 -- SP 1: sp_load_recipe_granel
---   Carga recetas nivel 1 (fórmulas químicas de graneles F1, F2, F3...)
---   Fuente: Recetas WHERE CODARTICULO LIKE 'F%' + RecetasLineas
+--   MODO: CSV Bridge (lee de stg.csv_recetas_granel)
+--   Para modo Linked Server: reemplazar FROM stg.csv_recetas_granel
+--   por JOIN GestionProlimpio.dbo.RecetasLineas + Recetas + Articulos
 -- ────────────────────────────────────────────────────────────
 CREATE OR ALTER PROCEDURE gold.sp_load_recipe_granel
     @tenant_id INT
@@ -34,33 +35,19 @@ BEGIN
     )
     SELECT
         @tenant_id,
-        RL.RECETA,
-        LTRIM(RTRIM(R.CODARTICULO)),
-        LTRIM(RTRIM(R.DESCRIPCION)),
-        R.CANTIDAD,
-        RL.LINEA,
-        LTRIM(RTRIM(RL.CODARTICULO)),
-        LTRIM(RTRIM(RL.DESCRIPCION)),
-        CASE LTRIM(RTRIM(A.CodStock))
-            WHEN '3.3.1.1' THEN 'quimico'
-            WHEN '3.3.1.2' THEN 'envase'
-            WHEN '3.3.1.3' THEN 'etiqueta'
-            WHEN '3.3.1.4' THEN 'fragancia'
-            ELSE                'quimico'
-        END,
-        RL.CANTIDAD,
-        CASE WHEN R.CANTIDAD > 0 THEN RL.CANTIDAD / R.CANTIDAD ELSE 0 END,
-        LTRIM(RTRIM(RL.MEDIDA)),
-        RL.COSTO
-    FROM [GestionProlimpio].[dbo].[RecetasLineas] RL
-    JOIN [GestionProlimpio].[dbo].[Recetas] R
-        ON RL.RECETA = R.RECETA
-    JOIN [GestionProlimpio].[dbo].[Articulos] A
-        ON A.CodArticulo = LTRIM(RTRIM(RL.CODARTICULO))
-    JOIN [GestionProlimpio].[dbo].[Grupos] G
-        ON A.Grupo = G.Grupo
-    WHERE LTRIM(RTRIM(R.CODARTICULO)) LIKE 'F%'
-      AND R.CANTIDAD > 1;
+        src.recipe_id,
+        LTRIM(RTRIM(src.granel_sku)),
+        LTRIM(RTRIM(src.granel_name)),
+        src.batch_liters,
+        src.recipe_line,
+        LTRIM(RTRIM(src.component_sku)),
+        LTRIM(RTRIM(src.component_name)),
+        LTRIM(RTRIM(src.component_type)),
+        src.qty_per_batch,
+        src.qty_per_liter,
+        ISNULL(NULLIF(LTRIM(RTRIM(src.unit_of_measure)), ''), 'Uni'),
+        src.cost_per_batch
+    FROM stg.csv_recetas_granel src;
 
     PRINT 'Recetas granel cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
 
@@ -79,11 +66,14 @@ GO
 
 -- ────────────────────────────────────────────────────────────
 -- SP 2: sp_load_recipe_product
---   Carga recetas nivel 2 (productos envasados) DIRECTAMENTE de Macrosoft.
---   Fuente: Recetas WHERE CODARTICULO NOT LIKE 'F%' + RecetasLineas
---   liters_per_unit se deriva del componente granel (CODARTICULO LIKE 'F%')
---   en RecetasLineas. No requiere CSV de Power BI.
+--   MODO: CSV Bridge (lee de stg.csv_recetas_producto)
+--   Para modo Linked Server: reemplazar FROM stg.csv_recetas_producto
+--   por JOIN GestionProlimpio.dbo.RecetasLineas + Recetas + Articulos
+--   NOTA: ejecutar este archivo con sqlcmd -I (QUOTED_IDENTIFIER ON)
+--   o poner SET QUOTED_IDENTIFIER ON; GO antes de este bloque en SSMS.
 -- ────────────────────────────────────────────────────────────
+SET QUOTED_IDENTIFIER ON;
+GO
 CREATE OR ALTER PROCEDURE gold.sp_load_recipe_product
     @tenant_id INT
 AS
@@ -92,20 +82,15 @@ BEGIN
 
     DELETE FROM gold.dim_recipe_product WHERE tenant_id = @tenant_id;
 
-    -- Para cada receta de envasado, el primer componente granel define liters_per_unit
-    WITH granel_info AS (
+    -- granel_sku y liters_per_unit: fila con component_type = 'granel' por producto
+    ;WITH granel_info AS (
         SELECT
-            RL.RECETA,
-            LTRIM(RTRIM(RL.CODARTICULO)) AS granel_sku,
-            RL.CANTIDAD                  AS liters_per_unit,
-            ROW_NUMBER() OVER (
-                PARTITION BY RL.RECETA ORDER BY RL.LINEA
-            ) AS rn
-        FROM [GestionProlimpio].[dbo].[RecetasLineas] RL
-        JOIN [GestionProlimpio].[dbo].[Recetas] R
-            ON RL.RECETA = R.RECETA
-        WHERE LTRIM(RTRIM(R.CODARTICULO)) NOT LIKE 'F%'
-          AND LTRIM(RTRIM(RL.CODARTICULO)) LIKE 'F%'
+            LTRIM(RTRIM(product_sku))        AS product_sku,
+            MAX(LTRIM(RTRIM(component_sku))) AS granel_sku,
+            MAX(qty_per_unit)                AS liters_per_unit
+        FROM stg.csv_recetas_producto
+        WHERE LTRIM(RTRIM(component_type)) = 'granel'
+        GROUP BY LTRIM(RTRIM(product_sku))
     )
     INSERT INTO gold.dim_recipe_product (
         tenant_id, product_sku, product_name, granel_sku,
@@ -114,41 +99,19 @@ BEGIN
     )
     SELECT
         @tenant_id,
-        LTRIM(RTRIM(R.CODARTICULO)),
-        LTRIM(RTRIM(R.DESCRIPCION)),
+        LTRIM(RTRIM(src.product_sku)),
+        LTRIM(RTRIM(src.product_name)),
         ISNULL(gi.granel_sku, ''),
         ISNULL(gi.liters_per_unit, 0),
-        LTRIM(RTRIM(RL.CODARTICULO)),
-        LTRIM(RTRIM(RL.DESCRIPCION)),
-        CASE
-            WHEN LTRIM(RTRIM(RL.CODARTICULO)) LIKE 'F%'       THEN 'granel'
-            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.1'     THEN 'quimico'
-            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.2'     THEN 'envase'
-            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.3'     THEN 'etiqueta'
-            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.4'     THEN 'fragancia'
-            ELSE                                                     'envase'
-        END,
-        RL.CANTIDAD,
-        ISNULL(NULLIF(LTRIM(RTRIM(RL.MEDIDA)), ''), 'Uni'),
-        -- Marcar inactivos los productos discontinuados (descripción 'ZZZ...')
-        CASE WHEN LTRIM(RTRIM(R.DESCRIPCION)) LIKE 'ZZZ%' THEN 0 ELSE 1 END
-    FROM [GestionProlimpio].[dbo].[RecetasLineas] RL
-    JOIN [GestionProlimpio].[dbo].[Recetas] R
-        ON RL.RECETA = R.RECETA
-    -- Solo productos terminados activos de familia 1.1
-    JOIN [GestionProlimpio].[dbo].[Articulos] APROD
-        ON LTRIM(RTRIM(APROD.CodArticulo)) = LTRIM(RTRIM(R.CODARTICULO))
-    INNER JOIN [GestionProlimpio].[dbo].[Grupos] GPROD
-        ON APROD.Grupo = GPROD.Grupo
+        LTRIM(RTRIM(src.component_sku)),
+        LTRIM(RTRIM(src.component_name)),
+        LTRIM(RTRIM(src.component_type)),
+        src.qty_per_unit,
+        ISNULL(NULLIF(LTRIM(RTRIM(src.unit_of_measure)), ''), 'Uni'),
+        1   -- CSV ya excluye discontinuados
+    FROM stg.csv_recetas_producto src
     LEFT JOIN granel_info gi
-        ON gi.RECETA = RL.RECETA AND gi.rn = 1
-    -- ACOMP: componente de la línea de receta (para CodStock → component_type)
-    JOIN [GestionProlimpio].[dbo].[Articulos] ACOMP
-        ON LTRIM(RTRIM(ACOMP.CodArticulo)) = LTRIM(RTRIM(RL.CODARTICULO))
-    WHERE LTRIM(RTRIM(R.CODARTICULO)) NOT LIKE 'F%'
-      AND R.CANTIDAD = 1
-      AND LTRIM(RTRIM(GPROD.Grupo)) = '1.1'
-      AND APROD.NoDisponible = 0;
+        ON gi.product_sku = LTRIM(RTRIM(src.product_sku));
 
     PRINT 'Recetas producto cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
 
@@ -258,12 +221,10 @@ GO
 
 -- ────────────────────────────────────────────────────────────
 -- SP 4: sp_refresh_component_stock
---   Grupo '2.3' (F1, F2, F20…)      → stock via DOYSTOCKDP
---   Grupo '3.1' (MP, envases, etc.)  → stock desde movimientos Lineas2
---   Filtro: INNER JOIN Grupos; excluye 'ZZ%', 'MER%', '221802', 'MP03'.
---           Sin LlevaStock/NoDisponible (NoDisponible=1 ≠ inactivo en MP)
---   component_type por CodStock (subfamilia real de Macrosoft)
---   Clamping negativo: ABS < 5000 → 0; ABS >= 5000 → -1 (override manual)
+--   MODO: CSV Bridge (lee de stg.csv_stock_componentes)
+--   Para modo Linked Server: reemplazar por Articulos + Grupos + StockArt
+--   + cálculo movimientos Lineas2/Cabezal2
+--   Override manual: fact_component_stock_override tiene prioridad
 -- ────────────────────────────────────────────────────────────
 CREATE OR ALTER PROCEDURE gold.sp_refresh_component_stock
     @tenant_id INT
@@ -275,7 +236,6 @@ BEGIN
     DELETE FROM gold.fact_component_stock
     WHERE tenant_id = @tenant_id AND snapshot_date = @today;
 
-    -- ── Bloque 1: Graneles (Grupo '2.3') — DOYSTOCKDP ───────────────────────
     INSERT INTO gold.fact_component_stock (
         tenant_id, component_sku, component_name, component_type,
         store_code, stock_units, unit_of_measure,
@@ -283,111 +243,24 @@ BEGIN
     )
     SELECT
         @tenant_id,
-        LTRIM(RTRIM(A.CodArticulo)),
-        LTRIM(RTRIM(A.Descripcion)),
-        'granel',
+        LTRIM(RTRIM(src.component_sku)),
+        LTRIM(RTRIM(src.component_name)),
+        LTRIM(RTRIM(src.component_type)),
         'F',
-        ISNULL([GestionProlimpio].[dbo].DOYSTOCKDP(@today, A.CodArticulo, 'F'), 0),
+        -- Override manual tiene prioridad sobre el valor del CSV
+        ISNULL(ov.stock_real, src.stock_units),
         'Uni',
-        @today,
-        CASE WHEN ISNULL([GestionProlimpio].[dbo].DOYSTOCKDP(@today, A.CodArticulo, 'F'), 0) <= 0
+        ISNULL(src.snapshot_date, @today),
+        CASE WHEN ISNULL(ov.stock_real, src.stock_units) <= 0
              THEN 1 ELSE 0 END,
-        CASE WHEN ISNULL([GestionProlimpio].[dbo].DOYSTOCKDP(@today, A.CodArticulo, 'F'), 0)
-                  < ISNULL(A.StockMin, 0)
+        CASE WHEN ISNULL(ov.stock_real, src.stock_units)
+                  < ISNULL(src.stock_min, 0)
              THEN 1 ELSE 0 END,
-        A.StockMin
-    FROM [GestionProlimpio].[dbo].[Articulos] A
-    INNER JOIN [GestionProlimpio].[dbo].[Grupos]   G  ON A.Grupo    = G.Grupo
-    INNER JOIN [GestionProlimpio].[dbo].[StockArt] SA ON A.CodStock = SA.CodStock
-    WHERE LTRIM(RTRIM(G.Grupo)) = '2.3'
-      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zz%'
-      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zzz%'
-      AND A.CodArticulo NOT LIKE 'MER%'
-      AND A.CodArticulo NOT IN ('221802', 'MP03');
-
-    -- ── Bloque 2: MP/Envases/Etiquetas/Fragancias (Grupo '3.1') ─────────────
-    -- Stock = entradas - salidas (movimientos históricos completos).
-    -- Clamping: negativo pequeño (ABS < 5000) → 0; grande → -1 (marcar manual).
-    ;WITH entradas AS (
-        SELECT
-            LTRIM(RTRIM(L.CodArt))                AS CodArt,
-            SUM(L.CantidadDebe - L.CantidadHaber) AS qty
-        FROM [GestionProlimpio].[dbo].[Lineas2] L
-        JOIN [GestionProlimpio].[dbo].[Cabezal2] C
-            ON  L.Documento = C.DOCUMENTO
-            AND L.NroFact   = C.NROFACT
-            AND L.NroDoc    = C.NRODOC
-        WHERE (
-            (C.TIPDOC = 'C'  AND C.TIPO = 'P'
-                AND L.Documento IN ('06','07'))
-            OR
-            (C.TIPDOC = 'ST'
-                AND L.Documento IN ('11','111','120','32','CR','269','247','246'))
-        )
-          AND L.CantidadDebe > L.CantidadHaber
-        GROUP BY LTRIM(RTRIM(L.CodArt))
-    ),
-    salidas AS (
-        SELECT
-            LTRIM(RTRIM(L.CodArt))                AS CodArt,
-            SUM(L.CantidadHaber - L.CantidadDebe) AS qty
-        FROM [GestionProlimpio].[dbo].[Lineas2] L
-        JOIN [GestionProlimpio].[dbo].[Cabezal2] C
-            ON  L.Documento = C.DOCUMENTO
-            AND L.NroFact   = C.NROFACT
-            AND L.NroDoc    = C.NRODOC
-        WHERE (
-            (C.TIPDOC = 'ST' AND L.Documento IN ('111','112','122','270'))
-            OR
-            (C.TIPDOC = 'C'  AND L.Documento IN ('08'))
-            OR
-            (C.TIPDOC = 'V'  AND C.TIPO = 'C')
-        )
-          AND L.CantidadHaber > L.CantidadDebe
-        GROUP BY LTRIM(RTRIM(L.CodArt))
-    )
-    INSERT INTO gold.fact_component_stock (
-        tenant_id, component_sku, component_name, component_type,
-        store_code, stock_units, unit_of_measure,
-        snapshot_date, is_critical, is_low, stock_min
-    )
-    SELECT
-        @tenant_id,
-        LTRIM(RTRIM(A.CodArticulo)),
-        LTRIM(RTRIM(A.Descripcion)),
-        CASE LTRIM(RTRIM(A.CodStock))
-            WHEN '3.3.1.1' THEN 'quimico'
-            WHEN '3.3.1.2' THEN 'envase'
-            WHEN '3.3.1.3' THEN 'etiqueta'
-            WHEN '3.3.1.4' THEN 'fragancia'
-            ELSE                'quimico'
-        END,
-        'F',
-        stk.stock_calc,
-        'Uni',
-        @today,
-        CASE WHEN stk.stock_calc <= 0 THEN 1 ELSE 0 END,
-        CASE WHEN stk.stock_calc < ISNULL(A.StockMin, 0) THEN 1 ELSE 0 END,
-        A.StockMin
-    FROM [GestionProlimpio].[dbo].[Articulos] A
-    INNER JOIN [GestionProlimpio].[dbo].[Grupos]   G  ON A.Grupo    = G.Grupo
-    INNER JOIN [GestionProlimpio].[dbo].[StockArt] SA ON A.CodStock = SA.CodStock
-    LEFT JOIN entradas e ON e.CodArt = LTRIM(RTRIM(A.CodArticulo))
-    LEFT JOIN salidas  s ON s.CodArt = LTRIM(RTRIM(A.CodArticulo))
-    CROSS APPLY (
-        SELECT CASE
-            WHEN ISNULL(e.qty, 0) - ISNULL(s.qty, 0) >= 0
-                THEN ISNULL(e.qty, 0) - ISNULL(s.qty, 0)
-            WHEN ABS(ISNULL(e.qty, 0) - ISNULL(s.qty, 0)) < 5000
-                THEN 0.0
-            ELSE -1.0
-        END AS stock_calc
-    ) stk
-    WHERE LTRIM(RTRIM(G.Grupo)) = '3.1'
-      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zz%'
-      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zzz%'
-      AND A.CodArticulo NOT LIKE 'MER%'
-      AND A.CodArticulo NOT IN ('221802', 'MP03');
+        src.stock_min
+    FROM stg.csv_stock_componentes src
+    LEFT JOIN gold.fact_component_stock_override ov
+        ON  ov.tenant_id     = @tenant_id
+        AND ov.component_sku = LTRIM(RTRIM(src.component_sku));
 
     -- Actualizar stock efectivo = stock_units + OC pendientes
     UPDATE cs
@@ -463,8 +336,9 @@ GO
 
 -- ────────────────────────────────────────────────────────────
 -- SP 6: sp_refresh_purchase_orders
---   OC de componentes y MP (Documento='26'), todos los estados.
---   Casing: Lineas2 mixedCase, Cabezal2 UPPERCASE
+--   MODO: CSV Bridge (lee de stg.csv_oc_pendientes)
+--   Para modo Linked Server: reemplazar por
+--   Lineas2 + Cabezal2 + Articulos (Documento='26')
 -- ────────────────────────────────────────────────────────────
 CREATE OR ALTER PROCEDURE gold.sp_refresh_purchase_orders
     @tenant_id INT
@@ -474,33 +348,31 @@ BEGIN
 
     DELETE FROM gold.fact_purchase_orders WHERE tenant_id = @tenant_id;
 
+    -- Deduplicar por (nro_doc, component_sku): mantener la fila más reciente
+    ;WITH deduped AS (
+        SELECT *,
+               ROW_NUMBER() OVER (
+                   PARTITION BY LTRIM(RTRIM(nro_doc)), LTRIM(RTRIM(component_sku))
+                   ORDER BY order_date DESC
+               ) AS rn
+        FROM stg.csv_oc_pendientes
+    )
     INSERT INTO gold.fact_purchase_orders (
         tenant_id, order_date, component_sku, component_name,
         nro_doc, units_ordered, units_pending, status, total_cost
     )
     SELECT
         @tenant_id,
-        CAST(L.Fecha AS DATE),
-        LTRIM(RTRIM(L.CodArt)),
-        LTRIM(RTRIM(A.Descripcion)),
-        LTRIM(RTRIM(C.NRODOC)),
-        ABS(SUM(L.CantidadDebe)),
-        ABS(SUM(CASE WHEN C.FACTURADO = 0 THEN L.CantidadDebe ELSE 0 END)),
-        MAX(CASE WHEN C.FACTURADO = 0 THEN 'Pendiente' ELSE 'Recibido' END),
-        SUM(L.TotalLinea)
-    FROM [GestionProlimpio].[dbo].[Lineas2] L
-    JOIN [GestionProlimpio].[dbo].[Cabezal2] C
-        ON  L.Documento = C.DOCUMENTO
-        AND L.NroFact   = C.NROFACT
-        AND L.NroDoc    = C.NRODOC
-    JOIN [GestionProlimpio].[dbo].[Articulos] A
-        ON A.CodArticulo = L.CodArt
-    WHERE L.Documento = '26'
-      AND L.Fecha     >= DATEADD(MONTH, -6, GETDATE())
-    GROUP BY CAST(L.Fecha AS DATE),
-             LTRIM(RTRIM(L.CodArt)),
-             LTRIM(RTRIM(A.Descripcion)),
-             LTRIM(RTRIM(C.NRODOC));
+        src.order_date,
+        LTRIM(RTRIM(src.component_sku)),
+        LTRIM(RTRIM(src.component_name)),
+        LTRIM(RTRIM(src.nro_doc)),
+        src.units_ordered,
+        src.units_pending,
+        LTRIM(RTRIM(src.status)),
+        src.total_cost
+    FROM deduped src
+    WHERE src.rn = 1;
 
     PRINT 'Órdenes de compra cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
 END;
