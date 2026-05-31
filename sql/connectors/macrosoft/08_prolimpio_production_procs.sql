@@ -433,19 +433,12 @@ BEGIN
     ),
     stock_current AS (
         SELECT
-            sk.sku_code,
-            ISNULL(MAX(fsw.stock_units), 0) AS stock_current
-        FROM gold.dim_sku sk
-        LEFT JOIN gold.fact_stock_weekly fsw
-            ON  fsw.sku_id        = sk.sku_id
-            AND fsw.tenant_id     = @tenant_id
-            AND fsw.iso_year_week = (
-                SELECT MAX(iso_year_week)
-                FROM gold.fact_stock_weekly
-                WHERE tenant_id = @tenant_id
-            )
-        WHERE sk.tenant_id = @tenant_id
-        GROUP BY sk.sku_code
+            LTRIM(RTRIM(s.sku_code)) AS sku_code,
+            ISNULL(
+                CAST(s.stock_total AS INT), 0
+            ) AS stock_current
+        FROM stg.csv_stock_productos s
+        WHERE ISNULL(CAST(s.stock_total AS INT), 0) >= 0
     ),
     blocking AS (
         SELECT
