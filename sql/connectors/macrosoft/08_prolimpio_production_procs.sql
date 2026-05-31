@@ -35,32 +35,33 @@ BEGIN
     )
     SELECT
         @tenant_id,
-        src.recipe_id,
+        ISNULL(TRY_CAST(src.recipe_id    AS INT), 0),
         LTRIM(RTRIM(src.granel_sku)),
         LTRIM(RTRIM(src.granel_name)),
-        src.batch_liters,
-        src.recipe_line,
+        ISNULL(TRY_CAST(src.batch_liters AS DECIMAL(12,2)), 0),
+        ISNULL(TRY_CAST(src.recipe_line  AS INT), 0),
         LTRIM(RTRIM(src.component_sku)),
         LTRIM(RTRIM(src.component_name)),
         LTRIM(RTRIM(src.component_type)),
-        src.qty_per_batch,
-        src.qty_per_liter,
+        ISNULL(TRY_CAST(src.qty_per_batch AS DECIMAL(18,6)), 0),
+        ISNULL(TRY_CAST(src.qty_per_liter AS DECIMAL(18,8)), 0),   -- suele venir vacío en el CSV
         ISNULL(NULLIF(LTRIM(RTRIM(src.unit_of_measure)), ''), 'Uni'),
-        src.cost_per_batch
+        TRY_CAST(src.cost_per_batch AS DECIMAL(18,4))
     FROM stg.csv_recetas_granel src;
 
     PRINT 'Recetas granel cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
 
+    -- stg.csv_recetas_producto tiene sku_code + grupo_code (equivale a csv_articulos)
     UPDATE sk
     SET sk.family_code = LTRIM(RTRIM(sa.grupo_code)),
         sk.is_finished = CASE
             WHEN LTRIM(RTRIM(sa.grupo_code)) = '1.1' THEN 1
             ELSE 0 END
     FROM gold.dim_sku sk
-    JOIN stg.csv_articulos sa
+    JOIN stg.csv_recetas_producto sa
         ON LTRIM(RTRIM(sa.sku_code)) = sk.sku_code
-    WHERE sk.tenant_id = 100;
-    PRINT 'family_code/is_finished actualizados en dim_sku.';
+    WHERE sk.tenant_id = @tenant_id;
+    PRINT 'family_code/is_finished actualizados: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
 END;
 GO
 
@@ -82,15 +83,23 @@ BEGIN
 
     DELETE FROM gold.dim_recipe_product WHERE tenant_id = @tenant_id;
 
-    -- granel_sku y liters_per_unit: fila con component_type = 'granel' por producto
+    -- granel_sku y liters_per_unit: fila granel por producto (tabla con punto en nombre)
     ;WITH granel_info AS (
         SELECT
-            LTRIM(RTRIM(product_sku))        AS product_sku,
+            LTRIM(RTRIM(product_sku)) AS product_sku,
             MAX(LTRIM(RTRIM(component_sku))) AS granel_sku,
-            MAX(qty_per_unit)                AS liters_per_unit
-        FROM stg.csv_recetas_producto
+            MAX(ISNULL(TRY_CAST(qty_per_unit AS DECIMAL(18,6)), 0)) AS liters_per_unit
+        FROM stg.[csv.recetas_producto]
         WHERE LTRIM(RTRIM(component_type)) = 'granel'
         GROUP BY LTRIM(RTRIM(product_sku))
+    ),
+    deduped AS (
+        SELECT *,
+               ROW_NUMBER() OVER (
+                   PARTITION BY LTRIM(RTRIM(product_sku)), LTRIM(RTRIM(component_sku))
+                   ORDER BY (SELECT NULL)
+               ) AS rn
+        FROM stg.[csv.recetas_producto]
     )
     INSERT INTO gold.dim_recipe_product (
         tenant_id, product_sku, product_name, granel_sku,
@@ -106,25 +115,26 @@ BEGIN
         LTRIM(RTRIM(src.component_sku)),
         LTRIM(RTRIM(src.component_name)),
         LTRIM(RTRIM(src.component_type)),
-        src.qty_per_unit,
+        ISNULL(TRY_CAST(src.qty_per_unit AS DECIMAL(18,6)), 0),
         ISNULL(NULLIF(LTRIM(RTRIM(src.unit_of_measure)), ''), 'Uni'),
-        1   -- CSV ya excluye discontinuados
-    FROM stg.csv_recetas_producto src
-    LEFT JOIN granel_info gi
-        ON gi.product_sku = LTRIM(RTRIM(src.product_sku));
+        1
+    FROM deduped src
+    LEFT JOIN granel_info gi ON gi.product_sku = LTRIM(RTRIM(src.product_sku))
+    WHERE src.rn = 1;
 
     PRINT 'Recetas producto cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
 
+    -- stg.csv_recetas_producto tiene sku_code + grupo_code (equivale a csv_articulos)
     UPDATE sk
     SET sk.family_code = LTRIM(RTRIM(sa.grupo_code)),
         sk.is_finished = CASE
             WHEN LTRIM(RTRIM(sa.grupo_code)) = '1.1' THEN 1
             ELSE 0 END
     FROM gold.dim_sku sk
-    JOIN stg.csv_articulos sa
+    JOIN stg.csv_recetas_producto sa
         ON LTRIM(RTRIM(sa.sku_code)) = sk.sku_code
-    WHERE sk.tenant_id = 100;
-    PRINT 'family_code/is_finished actualizados en dim_sku.';
+    WHERE sk.tenant_id = @tenant_id;
+    PRINT 'family_code/is_finished actualizados: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
 END;
 GO
 
