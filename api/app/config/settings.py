@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     service_key: str = ""     # shared secret with ERP proxy; empty = service auth disabled
     service_mode: bool = False  # True = reject all non-service requests (production only)
 
+    # ── JWT auth service (FASE 1) ─────────────────────────────────────────────
+    jwt_expire_hours: int = 24         # access token lifetime; overrides jwt_expire_minutes
+    bcrypt_rounds: int = 12            # bcrypt cost factor (min 12 in production)
+    refresh_token_expire_days: int = 30
+
     @property
     def odbc_connection_string(self) -> str:
         """ODBC connection string built from individual settings."""

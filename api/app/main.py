@@ -7,9 +7,15 @@ import sys
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded as SlowApiRateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from app.api.router import router as v1_router
+from app.auth.router import router as auth_router, limiter as auth_limiter
 from app.config import settings
 from app.db.connection import pool
 
@@ -63,7 +69,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Retail AI Platform — API",
-    version="0.8.0",
+    version="0.9.0",
     description=(
         "Multi-tenant conversational analytics API. "
         "Exposes ten Gold data warehouse tools (alerts, dashboards, SKU analysis, "
@@ -81,7 +87,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.state.limiter = auth_limiter
+app.add_exception_handler(SlowApiRateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 app.include_router(v1_router)
+app.include_router(auth_router)
 
 
 @app.get("/", include_in_schema=False)

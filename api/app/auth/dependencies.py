@@ -116,3 +116,53 @@ async def get_auth_context(
         tenant_id=x_mock_tenant if x_mock_tenant is not None else 7,
         role=role,
     )
+
+
+# ── New-auth dependencies (used by /api/v1/auth/* endpoints only) ────────────
+# These are separate from get_auth_context — they do a real DB lookup
+# and are used exclusively by the auth router (login / me / refresh / logout).
+
+from fastapi.security import OAuth2PasswordBearer as _OAuth2  # noqa: E402
+from app.auth.service import decode_access_token as _decode_safe  # noqa: E402
+
+_oauth2_scheme = _OAuth2(tokenUrl="/api/v1/auth/login", auto_error=False)
+
+
+async def get_current_user_dep(
+    token: Annotated[str | None, Depends(_oauth2_scheme)] = None,
+) -> "User":  # type: ignore[name-defined]  # imported lazily to avoid circular
+    from app.auth.models import User  # noqa: F401  (only for type hint above)
+    from app.auth import repository as _repo
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token requerido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    claims = _decode_safe(token)
+    if not claims:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido o expirado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user = await _repo.get_user_by_id(str(claims["sub"]))
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario no encontrado",
+        )
+    return user
+
+
+def require_role(*roles: str):
+    """FastAPI dependency factory — raises 403 if user's role is not in *roles*."""
+    async def _check(user=Depends(get_current_user_dep)):
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Rol requerido: {', '.join(roles)}",
+            )
+        return user
+    return _check

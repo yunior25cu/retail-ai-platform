@@ -31,8 +31,14 @@ def create_access_token(
     tenant_id: int,
     role: str,
     expires_minutes: int | None = None,
+    vertical: str | None = None,
 ) -> str:
-    """Mint an HS256 token. Default expiry from settings."""
+    """Mint an HS256 token. Default expiry from settings.
+
+    ``vertical`` is an optional tenant-level claim included for the benefit
+    of frontend clients (they can route without an extra API call). The chat
+    endpoints still read vertical from ``ai_tenant_config`` at runtime.
+    """
     now = datetime.now(timezone.utc)
     exp = now + timedelta(minutes=expires_minutes or settings.jwt_expire_minutes)
     payload: dict[str, Any] = {
@@ -42,6 +48,8 @@ def create_access_token(
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),
     }
+    if vertical is not None:
+        payload["vertical"] = vertical.lower()
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
