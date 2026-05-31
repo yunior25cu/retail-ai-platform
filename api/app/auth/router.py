@@ -45,16 +45,19 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=F
 _GENERIC_401 = "Credenciales inválidas"
 
 
-def _token_response(user: User, vertical: str) -> TokenResponse:
+def _token_response(user: User, vertical: str, platform_tenant_id: int | None = None) -> TokenResponse:
     plain_refresh = create_refresh_token()
+    # Use platform_tenant_id in the JWT so chat endpoints resolve vertical correctly.
+    # Falls back to user.tenant_id (auth internal id) if not mapped yet.
+    effective_tid = platform_tenant_id if platform_tenant_id is not None else user.tenant_id
     return TokenResponse(
         access_token=create_access_token(
-            str(user.id), user.tenant_id, user.role, vertical
+            str(user.id), effective_tid, user.role, vertical
         ),
         refresh_token=plain_refresh,
         token_type="bearer",
         expires_in=access_token_expires_in(),
-        tenant_id=user.tenant_id,
+        tenant_id=effective_tid,
         role=user.role,
         vertical=vertical,
     ), plain_refresh
@@ -75,7 +78,7 @@ async def login(request: Request, payload: LoginRequest) -> TokenResponse:
 
     await repo.update_last_login(str(user.id))
 
-    token_resp, plain_refresh = _token_response(user, tenant.vertical)
+    token_resp, plain_refresh = _token_response(user, tenant.vertical, tenant.platform_tenant_id)
     expires_at = datetime.now(timezone.utc) + timedelta(
         days=getattr(settings, "refresh_token_expire_days", 30)
     )
@@ -108,7 +111,7 @@ async def refresh(payload: RefreshRequest) -> TokenResponse:
     # Rotate: revoke current, issue new pair
     await repo.revoke_refresh_token(token_hash)
 
-    token_resp, plain_refresh = _token_response(user, tenant.vertical)
+    token_resp, plain_refresh = _token_response(user, tenant.vertical, tenant.platform_tenant_id)
     expires_at = datetime.now(timezone.utc) + timedelta(
         days=getattr(settings, "refresh_token_expire_days", 30)
     )

@@ -23,6 +23,7 @@ class Tenant:
     is_active: bool
     created_at: datetime
     trial_ends_at: date | None = None
+    platform_tenant_id: int | None = None  # maps to retail-ai-platform tenant_id
 
 
 @dataclass

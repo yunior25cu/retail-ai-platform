@@ -14,6 +14,7 @@ from app.db.connection import execute_query
 
 
 def _row_to_tenant(row: dict) -> Tenant:
+    ptid = row.get("platform_tenant_id")
     return Tenant(
         id=int(row["id"]),
         name=row["name"],
@@ -23,6 +24,7 @@ def _row_to_tenant(row: dict) -> Tenant:
         is_active=bool(row["is_active"]),
         created_at=row["created_at"],
         trial_ends_at=row.get("trial_ends_at"),
+        platform_tenant_id=int(ptid) if ptid is not None else None,
     )
 
 

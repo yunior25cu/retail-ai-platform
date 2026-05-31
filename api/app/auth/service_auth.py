@@ -17,29 +17,55 @@ from fastapi import HTTPException, Request, status
 
 from app.config import settings
 
-VALID_ROLES = {"direccion", "marca", "tienda", "sku"}
+VALID_ROLES = {"direccion", "marca", "tienda", "sku", "produccion"}
 
 
 @dataclass(frozen=True)
 class ServiceAuthContext:
-    """Identity resolved from X-* service headers."""
+    """Identity resolved from X-* service headers OR Bearer JWT.
+
+    user_id is str so it can hold both integer ERP user IDs (Balaxys path)
+    and UUID sub claims (standalone JWT path). Audit log uses it as-is.
+    """
 
     tenant_id: int
-    user_id: int       # ERP user ID (audit log only — not validated here)
-    role: str          # direccion | marca | tienda | sku
+    user_id: str       # ERP int-as-string OR JWT UUID sub
+    role: str          # direccion | marca | tienda | sku | produccion
     conversation_id: str | None
     request_id: str    # generated if caller omits X-Request-Id
 
 
 async def get_service_auth_context(request: Request) -> ServiceAuthContext:
-    """FastAPI dependency for POST /api/v1/internal/chat.
+    """FastAPI dependency for POST /api/v1/internal/chat and /suggestions.
+
+    Resolution order:
+        1. Authorization: Bearer <jwt>  → standalone product path (no ERP proxy)
+        2. X-Service-Key + X-Tenant-Id  → Balaxys ERP proxy path (unchanged)
 
     Raises:
-        503  if SERVICE_KEY is not configured server-side
-        401  if X-Service-Key header is absent or wrong
-        400  if X-Tenant-Id or X-User-Id are missing / non-integer
-    Invalid X-User-Role is silently mapped to 'sku' (most restrictive).
+        401  if neither auth method is present or valid
+        400  if required X-* headers are missing in the service-key path
+        503  if SERVICE_KEY is not configured and JWT path fails
     """
+    # ── JWT path (standalone React product) ──────────────────────────────
+    # If a valid Bearer JWT is present, use it without X-Service-Key.
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        from app.auth.service import decode_access_token as _decode_jwt
+        claims = _decode_jwt(auth_header[7:].strip())
+        if claims:
+            role = str(claims.get("role", "sku")).lower()
+            if role not in VALID_ROLES:
+                role = "sku"
+            return ServiceAuthContext(
+                tenant_id=int(claims["tenant_id"]),
+                user_id=str(claims["sub"]),
+                role=role,
+                conversation_id=request.headers.get("X-Conversation-Id") or None,
+                request_id=request.headers.get("X-Request-Id") or str(uuid4()),
+            )
+
+    # ── X-Service-Key path (Balaxys ERP proxy — unchanged) ───────────────
     if not settings.service_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -73,13 +99,6 @@ async def get_service_auth_context(request: Request) -> ServiceAuthContext:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing required header: X-User-Id",
         )
-    try:
-        user_id = int(user_id_str)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-User-Id must be an integer",
-        ) from e
 
     role = (request.headers.get("X-User-Role") or "sku").lower()
     if role not in VALID_ROLES:
@@ -90,7 +109,7 @@ async def get_service_auth_context(request: Request) -> ServiceAuthContext:
 
     return ServiceAuthContext(
         tenant_id=tenant_id,
-        user_id=user_id,
+        user_id=user_id_str,
         role=role,
         conversation_id=conversation_id,
         request_id=request_id,
