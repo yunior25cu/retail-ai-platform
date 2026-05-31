@@ -1,10 +1,9 @@
 """
 Prophet forecast runner — independiente de Power BI.
 
-Lee ventas históricas desde stg.[csv.ventas_historicas] en pymeconta_local
-(modo CSV bridge, misma red que los SPs de producción).
-Entrena un modelo Prophet por SKU y guarda en gold.fact_demand_forecast.
-Al finalizar recalcula gold.fact_production_plan_weekly.
+Destino según tenant:
+  Tenants SQL Server (Balaxys/retail) → gold.fact_demand_forecast (pyodbc/MERGE)
+  Tenants PostgreSQL (industriales)   → gold_t{id}.fact_demand_forecast (psycopg2/UPSERT)
 
 Uso:
     python scripts/run_prophet_forecast.py --tenant 24
@@ -15,10 +14,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import warnings
 from datetime import date
 
 import pandas as pd
+import psycopg2
+import psycopg2.extras
 import pyodbc
 from prophet import Prophet
 
@@ -30,7 +32,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Conexiones ────────────────────────────────────────────────────────────────
-import os as _os
 
 # Macrosoft: conexión del cliente — sigue como configuración local de Prolimpio
 MACROSOFT_CONN = (
@@ -39,15 +40,36 @@ MACROSOFT_CONN = (
     "UID=consulta;PWD=consulta;"
 )
 
-# Gold DB: lee de variables de entorno; los mismos nombres que api/.env
+# Gold DB SQL Server: lee ventas históricas (CSV bridge)
 GOLD_CONN = (
     "DRIVER={ODBC Driver 17 for SQL Server};"
-    f"SERVER={_os.getenv('SQL_SERVER', r'.\SQLEXPRESS')};"
-    f"DATABASE={_os.getenv('SQL_DATABASE', 'pymeconta_local')};"
-    f"UID={_os.getenv('SQL_USER', 'sa')};"
-    f"PWD={_os.getenv('SQL_PASSWORD', '')};"
+    f"SERVER={os.getenv('SQL_SERVER', r'.\SQLEXPRESS')};"
+    f"DATABASE={os.getenv('SQL_DATABASE', 'pymeconta_local')};"
+    f"UID={os.getenv('SQL_USER', 'sa')};"
+    f"PWD={os.getenv('SQL_PASSWORD', '')};"
     "TrustServerCertificate=yes;Encrypt=no;"
 )
+
+# PostgreSQL: destino para tenants industriales
+PG_CONN = {
+    "host":     os.getenv("PG_HOST",     "localhost"),
+    "port":     int(os.getenv("PG_PORT", "5432")),
+    "dbname":   os.getenv("PG_DATABASE", "asistente-ia"),
+    "user":     os.getenv("PG_USER",     "postgres"),
+    "password": os.getenv("PG_PASSWORD", "postgres"),
+}
+
+_PG_TENANTS = {int(x) for x in os.getenv("PG_TENANTS", "24").split(",") if x.strip()}
+
+
+def _is_pg(tenant_id: int) -> bool:
+    return tenant_id in _PG_TENANTS
+
+
+def _iso_week(d: date) -> str:
+    """YYYY-Www format for a date (Python-native, no DB lookup needed)."""
+    iso = d.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
 
 # ── Query de ventas históricas — MODO CSV Bridge ──────────────────────────────
 # Lee de stg.[csv.ventas_historicas] en pymeconta_local.
@@ -149,7 +171,59 @@ def _train_product(
     return rows
 
 
-def _save_forecasts(
+def _save_forecasts_pg(
+    rows: list[dict],
+    tenant_id: int,
+    model_run_date: date,
+    horizon_days: int,
+    model_version: str,
+) -> None:
+    """Guarda predicciones en PostgreSQL (gold_t{tenant_id})."""
+    schema = f"gold_t{tenant_id}"
+    conn = psycopg2.connect(**PG_CONN)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"UPDATE {schema}.fact_demand_forecast SET is_active = FALSE "
+        "WHERE tenant_id = %s AND model_run_date < %s",
+        (tenant_id, model_run_date),
+    )
+
+    batch = [
+        (
+            tenant_id,
+            r["sku_code"],
+            r["forecast_date"],
+            _iso_week(r["forecast_date"]),
+            int(r["predicted_units"]),
+            int(r["yhat_lower"]),
+            int(r["yhat_upper"]),
+            model_run_date,
+            horizon_days,
+            model_version,
+        )
+        for r in rows
+    ]
+
+    psycopg2.extras.execute_batch(
+        cursor,
+        f"""INSERT INTO {schema}.fact_demand_forecast
+            (tenant_id, sku_code, forecast_date, iso_year_week,
+             predicted_units, yhat_lower, yhat_upper,
+             model_run_date, horizon_days, model_version)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (tenant_id, sku_code, forecast_date, model_run_date)
+           DO NOTHING""",
+        batch,
+        page_size=500,
+    )
+
+    conn.commit()
+    conn.close()
+    log.info("Guardadas %d predicciones en %s.fact_demand_forecast", len(rows), schema)
+
+
+def _save_forecasts_ss(
     rows: list[dict],
     tenant_id: int,
     model_run_date: date,
@@ -157,6 +231,7 @@ def _save_forecasts(
     model_version: str,
     conn_str: str,
 ) -> None:
+    """Guarda predicciones en SQL Server (gold.fact_demand_forecast)."""
     conn = pyodbc.connect(conn_str)
     cursor = conn.cursor()
 
@@ -175,7 +250,7 @@ def _save_forecasts(
                 tenant_id,
                 r["sku_code"],
                 str(r["forecast_date"]),
-                str(r["forecast_date"]),  # iso_year_week resolved via subquery
+                str(r["forecast_date"]),
                 int(r["predicted_units"]),
                 int(r["yhat_lower"]),
                 int(r["yhat_upper"]),
@@ -186,7 +261,6 @@ def _save_forecasts(
         if len(batch) >= 500:
             cursor.executemany(merge_sql, batch)
             batch = []
-
     if batch:
         cursor.executemany(merge_sql, batch)
 
@@ -195,13 +269,94 @@ def _save_forecasts(
     log.info("Guardadas %d predicciones en gold.fact_demand_forecast", len(rows))
 
 
+def _save_forecasts(
+    rows: list[dict],
+    tenant_id: int,
+    model_run_date: date,
+    horizon_days: int,
+    model_version: str,
+    conn_str: str,
+) -> None:
+    """Enruta al método correcto según el tenant."""
+    if _is_pg(tenant_id):
+        _save_forecasts_pg(rows, tenant_id, model_run_date, horizon_days, model_version)
+    else:
+        _save_forecasts_ss(rows, tenant_id, model_run_date, horizon_days, model_version, conn_str)
+
+
 def _refresh_plan(tenant_id: int, conn_str: str) -> None:
-    conn = pyodbc.connect(conn_str)
+    """Recalcula el plan semanal de producción."""
+    if _is_pg(tenant_id):
+        # PostgreSQL: no hay SP, el plan se recalcula con una query Python directa
+        _refresh_plan_pg(tenant_id)
+    else:
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+        cursor.execute("EXEC gold.sp_refresh_production_plan_weekly ?", tenant_id)
+        conn.commit()
+        conn.close()
+    log.info("Plan semanal recalculado para tenant %d", tenant_id)
+
+
+def _refresh_plan_pg(tenant_id: int) -> None:
+    """Recalcula fact_production_plan_weekly en PostgreSQL a partir del forecast."""
+    schema = f"gold_t{tenant_id}"
+    conn = psycopg2.connect(**PG_CONN)
     cursor = conn.cursor()
-    cursor.execute("EXEC gold.sp_refresh_production_plan_weekly ?", tenant_id)
+
+    cursor.execute(f"DELETE FROM {schema}.fact_production_plan_weekly WHERE tenant_id = %s", (tenant_id,))
+
+    cursor.execute(f"""
+        INSERT INTO {schema}.fact_production_plan_weekly
+            (tenant_id, sku_code, iso_year_week,
+             predicted_units_week, predicted_units_30d,
+             stock_current, stock_final,
+             units_to_produce, liters_to_produce,
+             days_of_coverage, is_critical)
+        SELECT
+            f.tenant_id,
+            f.sku_code,
+            f.iso_year_week,
+            SUM(f.predicted_units)                       AS predicted_units_week,
+            COALESCE((
+                SELECT SUM(f2.predicted_units)
+                FROM {schema}.fact_demand_forecast f2
+                WHERE f2.tenant_id  = f.tenant_id
+                  AND f2.sku_code   = f.sku_code
+                  AND f2.is_active  = TRUE
+                  AND f2.forecast_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+            ), 0)                                        AS predicted_units_30d,
+            COALESCE(cs.stock_units, 0)::INT             AS stock_current,
+            COALESCE(cs.stock_units, 0)::INT             AS stock_final,
+            GREATEST(0,
+                SUM(f.predicted_units) - COALESCE(cs.stock_units, 0)
+            )::INT                                       AS units_to_produce,
+            NULL                                         AS liters_to_produce,
+            CASE WHEN SUM(f.predicted_units) > 0
+                 THEN ROUND(COALESCE(cs.stock_units, 0)::NUMERIC /
+                            (SUM(f.predicted_units)::NUMERIC / 5), 1)
+                 ELSE NULL END                           AS days_of_coverage,
+            CASE WHEN COALESCE(cs.stock_units, 0) <
+                      (SUM(f.predicted_units)::NUMERIC / 5 * 7)
+                 THEN TRUE ELSE FALSE END                AS is_critical
+        FROM {schema}.fact_demand_forecast f
+        LEFT JOIN {schema}.fact_component_stock cs
+            ON  cs.tenant_id     = f.tenant_id
+            AND cs.component_sku = f.sku_code
+            AND cs.snapshot_date = (
+                SELECT MAX(s2.snapshot_date)
+                FROM {schema}.fact_component_stock s2
+                WHERE s2.tenant_id = f.tenant_id
+            )
+        WHERE f.tenant_id    = %s
+          AND f.is_active     = TRUE
+          AND f.forecast_date >= CURRENT_DATE
+        GROUP BY f.tenant_id, f.sku_code, f.iso_year_week, cs.stock_units
+        ON CONFLICT (tenant_id, sku_code, iso_year_week) DO NOTHING;
+    """, (tenant_id,))
+
     conn.commit()
     conn.close()
-    log.info("Plan semanal recalculado para tenant %d", tenant_id)
 
 
 def run_forecast(
