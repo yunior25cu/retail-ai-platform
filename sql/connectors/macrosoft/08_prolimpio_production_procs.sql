@@ -258,15 +258,19 @@ BEGIN
         LTRIM(RTRIM(src.component_type)),
         'F',
         -- Override manual tiene prioridad sobre el valor del CSV
-        ISNULL(ov.stock_real, src.stock_units),
+        ISNULL(ov.stock_real,
+               ISNULL(TRY_CAST(src.stock_units AS DECIMAL(18,4)), 0)),
         'Uni',
-        ISNULL(src.snapshot_date, @today),
-        CASE WHEN ISNULL(ov.stock_real, src.stock_units) <= 0
+        -- formato 103 = dd/mm/yyyy (exportación Excel español); fallback @today
+        ISNULL(TRY_CONVERT(DATE, LTRIM(RTRIM(src.snapshot_date)), 103), @today),
+        CASE WHEN ISNULL(ov.stock_real,
+                         ISNULL(TRY_CAST(src.stock_units AS DECIMAL(18,4)), 0)) <= 0
              THEN 1 ELSE 0 END,
-        CASE WHEN ISNULL(ov.stock_real, src.stock_units)
-                  < ISNULL(src.stock_min, 0)
+        CASE WHEN ISNULL(ov.stock_real,
+                         ISNULL(TRY_CAST(src.stock_units AS DECIMAL(18,4)), 0))
+                  < ISNULL(TRY_CAST(src.stock_min AS DECIMAL(18,4)), 0)
              THEN 1 ELSE 0 END,
-        src.stock_min
+        TRY_CAST(src.stock_min AS DECIMAL(18,4))
     FROM stg.csv_stock_componentes src
     LEFT JOIN gold.fact_component_stock_override ov
         ON  ov.tenant_id     = @tenant_id
