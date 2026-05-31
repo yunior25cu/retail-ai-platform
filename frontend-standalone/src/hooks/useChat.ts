@@ -112,6 +112,16 @@ export function useChat() {
     if (user) localStorage.removeItem(CONV_KEY(user.tenant_id));
   }, [user]);
 
+  const loadConversation = useCallback(
+    (convId: string, loadedMessages: ChatMessage[]) => {
+      setMessages(loadedMessages);
+      setConversationId(convId);
+      setError(null);
+      if (user) localStorage.setItem(CONV_KEY(user.tenant_id), convId);
+    },
+    [user]
+  );
+
   return {
     messages,
     conversationId,
@@ -120,5 +130,6 @@ export function useChat() {
     suggestions,
     sendMessage,
     clearConversation,
+    loadConversation,
   };
 }

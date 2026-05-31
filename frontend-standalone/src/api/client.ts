@@ -159,6 +159,73 @@ export interface SuggestionsResponse {
   suggestions: string[];
 }
 
+export interface ConversationSummary {
+  conversation_id: string;
+  title: string;
+  last_message_at: string | null;
+  message_count: number;
+}
+
+export interface ConversationMessage {
+  role: string;
+  content: string;
+  tools_used: string[] | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export interface TenantConfigResponse {
+  monthly_budget_usd: number;
+  budget_alert_pct: number;
+  memory_turns: number;
+  suggestions_enabled: boolean;
+  rate_limits: Record<string, number>;
+  current_spend_usd: number;
+  vertical: string;
+}
+
+export interface TenantConfigPatch {
+  monthly_budget_usd?: number;
+  budget_alert_pct?: number;
+  memory_turns?: number;
+  suggestions_enabled?: boolean;
+  rate_limit_director?: number;
+  rate_limit_produccion?: number;
+  rate_limit_compras?: number;
+  rate_limit_marca?: number;
+  rate_limit_tienda?: number;
+  rate_limit_producto?: number;
+}
+
+export interface AdminTenant {
+  id: number;
+  name: string;
+  slug: string;
+  vertical: string;
+  plan: string;
+  is_active: boolean;
+  created_at: string;
+  platform_tenant_id: number | null;
+}
+
+export interface AdminUser {
+  id: string;
+  email: string;
+  role: string;
+  full_name: string | null;
+  tenant_id: number;
+  is_active: boolean;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+export interface VerticalOut {
+  name: string;
+  label: string;
+  tool_count: number;
+  tenant_count: number;
+}
+
 export const api = {
   login: (payload: LoginPayload) =>
     http.post<TokenResponse>("/api/v1/auth/login", payload).then((r) => r.data),
@@ -183,4 +250,43 @@ export const api = {
         headers: { "X-Tenant-Id": String(tenantId), "X-User-Role": role },
       })
       .then((r) => r.data),
+
+  getConversations: () =>
+    http.get<ConversationSummary[]>("/api/v1/internal/conversations").then((r) => r.data),
+
+  getConversationMessages: (conversationId: string) =>
+    http
+      .get<ConversationMessage[]>(`/api/v1/internal/conversations/${conversationId}/messages`)
+      .then((r) => r.data),
+
+  // Config
+  getTenantConfig: () =>
+    http.get<TenantConfigResponse>("/api/v1/config/tenant").then((r) => r.data),
+
+  patchTenantConfig: (patch: TenantConfigPatch) =>
+    http.patch<TenantConfigResponse>("/api/v1/config/tenant", patch).then((r) => r.data),
+
+  // Admin
+  adminGetTenants: () =>
+    http.get<AdminTenant[]>("/api/v1/admin/tenants").then((r) => r.data),
+
+  adminCreateTenant: (payload: Omit<AdminTenant, "id" | "is_active" | "created_at">) =>
+    http.post<AdminTenant>("/api/v1/admin/tenants", payload).then((r) => r.data),
+
+  adminPatchTenant: (id: number, patch: Partial<AdminTenant>) =>
+    http.patch<AdminTenant>(`/api/v1/admin/tenants/${id}`, patch).then((r) => r.data),
+
+  adminGetUsers: (tenantId?: number) =>
+    http
+      .get<AdminUser[]>("/api/v1/admin/users", { params: tenantId ? { tenant_id: tenantId } : {} })
+      .then((r) => r.data),
+
+  adminInviteUser: (payload: { email: string; password: string; role: string; full_name?: string; tenant_id: number }) =>
+    http.post<AdminUser>("/api/v1/admin/users/invite", payload).then((r) => r.data),
+
+  adminPatchUser: (id: string, patch: { role?: string; is_active?: boolean; full_name?: string }) =>
+    http.patch<AdminUser>(`/api/v1/admin/users/${id}`, patch).then((r) => r.data),
+
+  adminGetVerticals: () =>
+    http.get<VerticalOut[]>("/api/v1/admin/verticals").then((r) => r.data),
 };
