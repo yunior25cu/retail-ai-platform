@@ -72,19 +72,33 @@ async def login(request: Request, payload: LoginRequest) -> TokenResponse:
                             detail=_GENERIC_401)
 
     user = await repo.get_user_by_email(tenant.id, payload.email)
+
+    # Superadmin (tenant_id=NULL) can log in via any tenant slug
+    if not user:
+        user = await repo.get_superadmin_by_email(payload.email)
+
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail=_GENERIC_401)
 
+    # update_last_login routes automatically by id type (int→PG, UUID→SS)
     await repo.update_last_login(str(user.id))
+    is_superadmin = user.role == "superadmin"
 
-    token_resp, plain_refresh = _token_response(user, tenant.vertical, tenant.platform_tenant_id)
+    token_resp, plain_refresh = _token_response(
+        user, tenant.vertical, tenant.platform_tenant_id
+    )
     expires_at = datetime.now(timezone.utc) + timedelta(
         days=getattr(settings, "refresh_token_expire_days", 30)
     )
-    await repo.save_refresh_token(
-        str(user.id), hash_refresh_token(plain_refresh), expires_at
-    )
+    if is_superadmin or repo._looks_like_int(str(user.id)):
+        await repo.save_refresh_token_pg(
+            str(user.id), hash_refresh_token(plain_refresh), expires_at
+        )
+    else:
+        await repo.save_refresh_token(
+            str(user.id), hash_refresh_token(plain_refresh), expires_at
+        )
 
     log.info("auth.login", tenant=tenant.slug, user_id=str(user.id), role=user.role)
     return token_resp

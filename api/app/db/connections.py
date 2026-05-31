@@ -3,11 +3,10 @@
 SQL Server (pymeconta_local) → clientes Balaxys/retail
 PostgreSQL (asistente-ia)     → clientes industriales (tenant 24+)
 
-The retail tools and all existing Balaxys code are untouched —
-they continue to call execute_query() which always hits SQL Server.
-
-Production tools call execute_query_tenant(sql, params, tenant_id)
-which routes to the right DB and handles placeholder differences.
+PG_TENANTS is loaded dynamically from auth.tenants on each request
+so new tenants added via POST /admin/tenants take effect immediately
+without restarting the API. For MVP this is fine; add TTL cache if
+latency becomes an issue with 10+ tenants.
 """
 
 from __future__ import annotations
@@ -24,11 +23,15 @@ log = structlog.get_logger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-def _load_pg_tenants() -> set[int]:
-    raw = os.getenv("PG_TENANTS", "24")
-    return {int(x.strip()) for x in raw.split(",") if x.strip()}
+# Fallback set read at startup — used if the DB query fails
+_PG_TENANTS_FALLBACK: set[int] = {
+    int(x.strip())
+    for x in os.getenv("PG_TENANTS", "24").split(",")
+    if x.strip()
+}
 
-PG_TENANTS: set[int] = _load_pg_tenants()
+# Legacy alias kept for backward-compatibility
+PG_TENANTS: set[int] = _PG_TENANTS_FALLBACK
 
 _PG_CONN_PARAMS: dict[str, Any] = {
     "host":     os.getenv("PG_HOST",     "localhost"),
@@ -41,8 +44,30 @@ _PG_CONN_PARAMS: dict[str, Any] = {
 
 # ── Routing helpers ───────────────────────────────────────────────────────────
 
+def _fetch_pg_tenants_sync() -> set[int]:
+    """Query auth.tenants to get current PG tenant set. Falls back to env var set."""
+    try:
+        conn = psycopg2.connect(**_PG_CONN_PARAMS)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT platform_tenant_id FROM auth.tenants "
+            "WHERE is_active = TRUE AND platform_tenant_id IS NOT NULL"
+        )
+        rows = cur.fetchall()
+        conn.close()
+        ids = {int(r[0]) for r in rows if r[0] is not None}
+        return ids if ids else _PG_TENANTS_FALLBACK
+    except Exception:  # noqa: BLE001
+        return _PG_TENANTS_FALLBACK
+
+
 def is_postgres(tenant_id: int) -> bool:
-    return tenant_id in PG_TENANTS
+    """Returns True if this tenant uses PostgreSQL (asistente-ia).
+
+    Queries auth.tenants on each call so new tenants registered via
+    POST /admin/tenants are picked up without API restart.
+    """
+    return tenant_id in _fetch_pg_tenants_sync()
 
 
 def get_schema(tenant_id: int) -> str:
