@@ -31,10 +31,10 @@ class AuthContext:
 
     user_id: str
     tenant_id: int
-    role: str  # 'direccion' / 'marca' / 'tienda' / 'sku'
+    role: str  # 'direccion' / 'marca' / 'tienda' / 'sku' / 'produccion'
 
 
-VALID_ROLES = {"direccion", "marca", "tienda", "sku"}
+VALID_ROLES = {"direccion", "marca", "tienda", "sku", "produccion"}
 
 
 async def get_auth_context(

@@ -308,11 +308,14 @@ _ROLE_INTENT: dict[str, str] = {
         "analista que decide sobre UN producto específico: su "
         "descuento, su rotación, su cobertura, en qué tienda rota "
         "mejor. Preguntas puntuales sobre un SKU.",
+    "produccion":
+        "jefe de producción que planifica qué fabricar hoy y esta semana. "
+        "Necesita saber qué productos están críticos (cobertura < 7 días), "
+        "qué insumos faltan, cómo distribuir la carga entre reactores y "
+        "cuántos litros producir. Preguntas operativas de fabricación.",
 }
 
 # Per-role fallback suggestions used when Claude fails or returns <3 lines.
-# A single shared fallback was misleading — "¿Qué tiendas tienen mayor impacto?"
-# is nonsense for a single-store user.
 _FALLBACK_BY_ROLE: dict[str, list[str]] = {
     "direccion": [
         "¿Cómo venimos vs plan este mes?",
@@ -334,15 +337,30 @@ _FALLBACK_BY_ROLE: dict[str, list[str]] = {
         "¿En qué tienda rota mejor este SKU?",
         "¿Qué descuento acelera su venta?",
     ],
+    "produccion": [
+        "¿Qué producimos hoy?",
+        "¿Qué insumos están críticos?",
+        "¿Cuántos lotes entran en el reactor grande?",
+    ],
 }
 
-_SUGGESTIONS_SYSTEM = (
+_SUGGESTIONS_SYSTEM_RETAIL = (
     "Sos un asistente de retail. Generá exactamente 3 preguntas "
     "cortas (máx 60 chars cada una) que haría un {intent} "
     "Contexto actual del negocio: {context}. "
     "Las preguntas DEBEN reflejar el horizonte y alcance descritos. "
     "Solo las 3 preguntas, sin numeración, separadas por newline."
 )
+
+_SUGGESTIONS_SYSTEM_PRODUCCION = (
+    "Sos un asistente de producción industrial. Generá exactamente 3 preguntas "
+    "cortas (máx 60 chars cada una) que haría un {intent} "
+    "Contexto actual de producción: {context}. "
+    "Las preguntas DEBEN ser sobre fabricación, insumos, reactores o cobertura. "
+    "Solo las 3 preguntas, sin numeración, separadas por newline."
+)
+
+_SUGGESTIONS_SYSTEM = _SUGGESTIONS_SYSTEM_RETAIL  # alias de compatibilidad
 
 
 class SuggestionsResponse(BaseModel):
@@ -393,8 +411,42 @@ async def get_suggestions(
     return SuggestionsResponse(suggestions=suggestions)
 
 
+async def _fetch_production_context(tenant_id: int) -> str:
+    """Compact summary of critical production plan for the suggestions prompt."""
+    from app.db.connection import execute_query as _eq
+    try:
+        rows = await _eq(
+            """
+            SELECT TOP 3
+                sk.sku_name,
+                ppw.units_to_produce,
+                CAST(ISNULL(ppw.days_of_coverage, 0) AS INT) AS cobertura_dias,
+                ppw.has_component_shortage
+            FROM gold.fact_production_plan_weekly ppw
+            JOIN gold.dim_sku sk
+                ON  sk.sku_code   = ppw.sku_code
+                AND sk.tenant_id  = ppw.tenant_id
+            WHERE ppw.tenant_id  = ?
+              AND ppw.is_critical = 1
+            ORDER BY ppw.days_of_coverage ASC;
+            """,
+            (tenant_id,),
+        )
+        if rows:
+            parts = [
+                f"{r['sku_name']}: {r['units_to_produce']} u, "
+                f"cob {r['cobertura_dias']} días"
+                + (" (sin insumos)" if r["has_component_shortage"] else "")
+                for r in rows
+            ]
+            return "; ".join(parts)
+    except Exception:  # noqa: BLE001
+        log.warning("suggestions.production_context_failed", tenant_id=tenant_id)
+    return "sin productos críticos activos"
+
+
 async def _generate_suggestions(tenant_id: int, role: str) -> list[str]:
-    """Call Claude with a compact alert summary to produce 3 tailored questions.
+    """Call Claude with a compact context summary to produce 3 tailored questions.
 
     Falls back to the role-specific list in _FALLBACK_BY_ROLE on any error
     (DB or Anthropic). Unknown roles default to the 'sku' fallback.
@@ -403,23 +455,27 @@ async def _generate_suggestions(tenant_id: int, role: str) -> list[str]:
     role_fallback = _FALLBACK_BY_ROLE.get(role, _FALLBACK_BY_ROLE["sku"])
 
     context = ""
-    try:
-        alerts = await fetch_active_alerts(tenant_id, limit=3)
-        if alerts:
-            parts = [
-                f"{a.get('alert_type', '?')} en "
-                f"{a.get('store_name') or 'tienda desconocida'} "
-                f"(impacto ${a.get('estimated_impact_usd') or 0:.0f})"
-                for a in alerts
-            ]
-            context = "; ".join(parts)
-    except Exception:  # noqa: BLE001
-        log.warning("suggestions.alerts_fetch_failed", tenant_id=tenant_id)
+    if role == "produccion":
+        context = await _fetch_production_context(tenant_id)
+        sys_tpl = _SUGGESTIONS_SYSTEM_PRODUCCION
+    else:
+        try:
+            alerts = await fetch_active_alerts(tenant_id, limit=3)
+            if alerts:
+                parts = [
+                    f"{a.get('alert_type', '?')} en "
+                    f"{a.get('store_name') or 'tienda desconocida'} "
+                    f"(impacto ${a.get('estimated_impact_usd') or 0:.0f})"
+                    for a in alerts
+                ]
+                context = "; ".join(parts)
+        except Exception:  # noqa: BLE001
+            log.warning("suggestions.alerts_fetch_failed", tenant_id=tenant_id)
+        if not context:
+            context = "sin alertas activas disponibles"
+        sys_tpl = _SUGGESTIONS_SYSTEM_RETAIL
 
-    if not context:
-        context = "sin alertas activas disponibles"
-
-    prompt = _SUGGESTIONS_SYSTEM.format(intent=intent, context=context)
+    prompt = sys_tpl.format(intent=intent, context=context)
     try:
         client = get_client()
         msg = await client.messages.create(

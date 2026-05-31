@@ -27,6 +27,7 @@ _VALID_KEYS = frozenset(
         "rate_limit_marca",
         "rate_limit_tienda",
         "rate_limit_producto",
+        "rate_limit_produccion",
         "suggestions_enabled",
     }
 )
@@ -47,18 +48,18 @@ class TenantConfig:
     rate_limit_marca: int = 30
     rate_limit_tienda: int = 15
     rate_limit_producto: int = 15
+    rate_limit_produccion: int = 30
     suggestions_enabled: bool = True
 
     def rate_limit_for_role(self, role: str) -> int:
-        """Returns the per-hour cap for a Python role string ('direccion'/
-        'marca'/'tienda'/'sku'). Unknown roles fall back to the strictest
-        (producto/sku) cap so we never grant more than we mean to."""
+        """Returns the per-hour cap for a Python role string."""
         mapping = {
             "direccion": self.rate_limit_director,
             "marca": self.rate_limit_marca,
             "tienda": self.rate_limit_tienda,
             "sku": self.rate_limit_producto,
             "producto": self.rate_limit_producto,
+            "produccion": self.rate_limit_produccion,
         }
         return mapping.get(role, self.rate_limit_producto)
 
@@ -86,6 +87,8 @@ def _apply_row(cfg: TenantConfig, key: str, value: str) -> None:
             cfg.rate_limit_tienda = int(value)
         elif key == "rate_limit_producto":
             cfg.rate_limit_producto = int(value)
+        elif key == "rate_limit_produccion":
+            cfg.rate_limit_produccion = int(value)
         elif key == "suggestions_enabled":
             cfg.suggestions_enabled = value.lower() == "true"
     except (TypeError, ValueError):
