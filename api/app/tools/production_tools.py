@@ -163,7 +163,8 @@ async def get_production_forecast(
             AND cat.category_id = sk.category_id"""
     iso_week = current_iso_week_expr(tenant_id)
 
-    critico_filter = "AND ppw.is_critical = 1" if solo_criticos else ""
+    _one = "TRUE" if pg else "1"
+    critico_filter = f"AND ppw.is_critical = {_one}" if solo_criticos else ""
     familia_filter = "AND cat.category_name = ?" if familia and not pg else ""
     params_list: list[Any] = [tenant_id]
     if familia and not pg:
@@ -484,7 +485,8 @@ async def get_component_stock(
     tipo_norm = tipo if tipo in TIPO_MAP else "todos"
 
     if tipo_norm == "criticos":
-        where_extra = "AND cs.is_critical = 1"
+        _one = "TRUE" if is_postgres(tenant_id) else "1"
+        where_extra = f"AND cs.is_critical = {_one}"
         extra_params: tuple[Any, ...] = ()
     elif TIPO_MAP.get(tipo_norm) is not None:
         tipos = TIPO_MAP[tipo_norm]
