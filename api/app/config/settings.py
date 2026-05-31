@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     service_key: str = ""     # shared secret with ERP proxy; empty = service auth disabled
     service_mode: bool = False  # True = reject all non-service requests (production only)
 
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # Comma-separated origins. In dev: http://localhost:5173,http://localhost:5174
+    cors_origins: str = "http://localhost:5173,http://localhost:5174"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
     # ── JWT auth service (FASE 1) ─────────────────────────────────────────────
     jwt_expire_hours: int = 24         # access token lifetime; overrides jwt_expire_minutes
     bcrypt_rounds: int = 12            # bcrypt cost factor (min 12 in production)
