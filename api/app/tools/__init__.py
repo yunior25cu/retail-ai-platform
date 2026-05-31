@@ -112,6 +112,32 @@ from app.tools.velocity import (
 )
 from app.tools.velocity import TOOL_DESCRIPTION as VEL_DESC
 from app.tools.velocity import TOOL_NAME as VEL_NAME
+from app.tools.production_tools import (
+    GetProductionForecastInput,
+    GetComponentRequirementsInput,
+    GetReactorScheduleInput,
+    GetCoverageAlertInput,
+    GetComponentStockInput,
+    GetProductionHistoryInput,
+    get_production_forecast,
+    get_component_requirements,
+    get_reactor_schedule,
+    get_coverage_alert,
+    get_component_stock,
+    get_production_history,
+    TOOL_NAME_FORECAST,
+    TOOL_NAME_REQUIREMENTS,
+    TOOL_NAME_REACTOR,
+    TOOL_NAME_COVERAGE,
+    TOOL_NAME_COMP_STOCK,
+    TOOL_NAME_HISTORY,
+    TOOL_DESC_FORECAST,
+    TOOL_DESC_REQUIREMENTS,
+    TOOL_DESC_REACTOR,
+    TOOL_DESC_COVERAGE,
+    TOOL_DESC_COMP_STOCK,
+    TOOL_DESC_HISTORY,
+)
 
 
 def _entry(
@@ -150,6 +176,13 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
     TOOL_NAME_EXEC_WEEKLY: _entry(TOOL_NAME_EXEC_WEEKLY, TOOL_DESCRIPTION_EXEC_WEEKLY, get_executive_weekly_briefing,     GetExecutiveWeeklyBriefingInput,         required_roles=REQUIRED_ROLES_EXEC_WEEKLY, is_composite=True),
     TOOL_NAME_STORE_DAILY: _entry(TOOL_NAME_STORE_DAILY, TOOL_DESCRIPTION_STORE_DAILY, get_store_daily_briefing,          GetStoreDailyBriefingInput,              required_roles=REQUIRED_ROLES_STORE_DAILY, is_composite=True),
     TOOL_NAME_BRAND_WEEKLY:_entry(TOOL_NAME_BRAND_WEEKLY,TOOL_DESCRIPTION_BRAND_WEEKLY,get_brand_weekly_review,           GetBrandWeeklyReviewInput,               required_roles=REQUIRED_ROLES_BRAND_WEEKLY, is_composite=True),
+    # ── Módulo de producción Prolimpio ────────────────────────────────────────
+    TOOL_NAME_FORECAST:    _entry(TOOL_NAME_FORECAST,    TOOL_DESC_FORECAST,    get_production_forecast,    GetProductionForecastInput),
+    TOOL_NAME_REQUIREMENTS:_entry(TOOL_NAME_REQUIREMENTS,TOOL_DESC_REQUIREMENTS,get_component_requirements, GetComponentRequirementsInput),
+    TOOL_NAME_REACTOR:     _entry(TOOL_NAME_REACTOR,     TOOL_DESC_REACTOR,     get_reactor_schedule,       GetReactorScheduleInput),
+    TOOL_NAME_COVERAGE:    _entry(TOOL_NAME_COVERAGE,    TOOL_DESC_COVERAGE,    get_coverage_alert,         GetCoverageAlertInput),
+    TOOL_NAME_COMP_STOCK:  _entry(TOOL_NAME_COMP_STOCK,  TOOL_DESC_COMP_STOCK,  get_component_stock,        GetComponentStockInput),
+    TOOL_NAME_HISTORY:     _entry(TOOL_NAME_HISTORY,     TOOL_DESC_HISTORY,     get_production_history,     GetProductionHistoryInput),
 }
 
 

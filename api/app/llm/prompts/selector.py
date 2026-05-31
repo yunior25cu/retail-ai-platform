@@ -10,14 +10,16 @@ from __future__ import annotations
 from app.llm.prompts.direccion import DIRECCION_SYSTEM_PROMPT
 from app.llm.prompts.generic import GENERIC_SYSTEM_PROMPT
 from app.llm.prompts.marca import MARCA_SYSTEM_PROMPT
+from app.llm.prompts.produccion import PRODUCCION_SYSTEM_PROMPT
 from app.llm.prompts.sku import SKU_SYSTEM_PROMPT
 from app.llm.prompts.tienda import TIENDA_SYSTEM_PROMPT
 
 _ROLE_MAP: dict[str, str] = {
-    "direccion": DIRECCION_SYSTEM_PROMPT,
-    "marca":     MARCA_SYSTEM_PROMPT,
-    "tienda":    TIENDA_SYSTEM_PROMPT,
-    "sku":       SKU_SYSTEM_PROMPT,
+    "direccion":  DIRECCION_SYSTEM_PROMPT,
+    "marca":      MARCA_SYSTEM_PROMPT,
+    "tienda":     TIENDA_SYSTEM_PROMPT,
+    "sku":        SKU_SYSTEM_PROMPT,
+    "produccion": PRODUCCION_SYSTEM_PROMPT,
 }
 
 

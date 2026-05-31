@@ -1,0 +1,652 @@
+-- ============================================================
+-- FASE 2 — STORED PROCEDURES DE CARGA — PRODUCCIÓN PROLIMPIO
+-- Destino: pymeconta_local (gold schema)
+-- Fuente:  GestionProlimpio (192.168.20.42)
+--
+-- Convenciones de casing confirmadas por forense:
+--   Cabezal2  → UPPERCASE: DOCUMENTO, NROFACT, NRODOC, FACTURADO, USUARIO, FECHA
+--   Lineas2   → mixedCase: Documento, NroFact, NroDoc, Fecha, CodArt,
+--                          CantidadDebe, CantidadHaber, TotalLinea
+--   Recetas   → UPPERCASE: RECETA, CODARTICULO, DESCRIPCION, CANTIDAD, COSTO
+--   RecetasLineas → UPPERCASE: RECETA, LINEA, CODARTICULO, DESCRIPCION,
+--                              CANTIDAD, MEDIDA, COSTO
+--   Articulos → mixedCase: CodArticulo, Descripcion, CodStock,
+--                          LlevaStock, StockMin, NoDisponible
+-- ============================================================
+
+-- ────────────────────────────────────────────────────────────
+-- SP 1: sp_load_recipe_granel
+--   Carga recetas nivel 1 (fórmulas químicas de graneles F1, F2, F3...)
+--   Fuente: Recetas WHERE CODARTICULO LIKE 'F%' + RecetasLineas
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_load_recipe_granel
+    @tenant_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    TRUNCATE TABLE gold.dim_recipe_granel;
+
+    INSERT INTO gold.dim_recipe_granel (
+        tenant_id, recipe_id, granel_sku, granel_name, batch_liters,
+        recipe_line, component_sku, component_name, component_type,
+        qty_per_batch, qty_per_liter, unit_of_measure, cost_per_batch
+    )
+    SELECT
+        @tenant_id,
+        RL.RECETA,
+        LTRIM(RTRIM(R.CODARTICULO)),
+        LTRIM(RTRIM(R.DESCRIPCION)),
+        R.CANTIDAD,
+        RL.LINEA,
+        LTRIM(RTRIM(RL.CODARTICULO)),
+        LTRIM(RTRIM(RL.DESCRIPCION)),
+        CASE LTRIM(RTRIM(A.CodStock))
+            WHEN '3.3.1.1' THEN 'quimico'
+            WHEN '3.3.1.2' THEN 'envase'
+            WHEN '3.3.1.3' THEN 'etiqueta'
+            WHEN '3.3.1.4' THEN 'fragancia'
+            ELSE                'quimico'
+        END,
+        RL.CANTIDAD,
+        CASE WHEN R.CANTIDAD > 0 THEN RL.CANTIDAD / R.CANTIDAD ELSE 0 END,
+        LTRIM(RTRIM(RL.MEDIDA)),
+        RL.COSTO
+    FROM [GestionProlimpio].[dbo].[RecetasLineas] RL
+    JOIN [GestionProlimpio].[dbo].[Recetas] R
+        ON RL.RECETA = R.RECETA
+    JOIN [GestionProlimpio].[dbo].[Articulos] A
+        ON A.CodArticulo = LTRIM(RTRIM(RL.CODARTICULO))
+    JOIN [GestionProlimpio].[dbo].[Grupos] G
+        ON A.Grupo = G.Grupo
+    WHERE LTRIM(RTRIM(R.CODARTICULO)) LIKE 'F%'
+      AND R.CANTIDAD > 1;
+
+    PRINT 'Recetas granel cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
+
+    UPDATE sk
+    SET sk.family_code = LTRIM(RTRIM(sa.grupo_code)),
+        sk.is_finished = CASE
+            WHEN LTRIM(RTRIM(sa.grupo_code)) = '1.1' THEN 1
+            ELSE 0 END
+    FROM gold.dim_sku sk
+    JOIN stg.csv_articulos sa
+        ON LTRIM(RTRIM(sa.sku_code)) = sk.sku_code
+    WHERE sk.tenant_id = 100;
+    PRINT 'family_code/is_finished actualizados en dim_sku.';
+END;
+GO
+
+-- ────────────────────────────────────────────────────────────
+-- SP 2: sp_load_recipe_product
+--   Carga recetas nivel 2 (productos envasados) DIRECTAMENTE de Macrosoft.
+--   Fuente: Recetas WHERE CODARTICULO NOT LIKE 'F%' + RecetasLineas
+--   liters_per_unit se deriva del componente granel (CODARTICULO LIKE 'F%')
+--   en RecetasLineas. No requiere CSV de Power BI.
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_load_recipe_product
+    @tenant_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM gold.dim_recipe_product WHERE tenant_id = @tenant_id;
+
+    -- Para cada receta de envasado, el primer componente granel define liters_per_unit
+    WITH granel_info AS (
+        SELECT
+            RL.RECETA,
+            LTRIM(RTRIM(RL.CODARTICULO)) AS granel_sku,
+            RL.CANTIDAD                  AS liters_per_unit,
+            ROW_NUMBER() OVER (
+                PARTITION BY RL.RECETA ORDER BY RL.LINEA
+            ) AS rn
+        FROM [GestionProlimpio].[dbo].[RecetasLineas] RL
+        JOIN [GestionProlimpio].[dbo].[Recetas] R
+            ON RL.RECETA = R.RECETA
+        WHERE LTRIM(RTRIM(R.CODARTICULO)) NOT LIKE 'F%'
+          AND LTRIM(RTRIM(RL.CODARTICULO)) LIKE 'F%'
+    )
+    INSERT INTO gold.dim_recipe_product (
+        tenant_id, product_sku, product_name, granel_sku,
+        liters_per_unit, component_sku, component_name,
+        component_type, qty_per_unit, unit_of_measure, is_active
+    )
+    SELECT
+        @tenant_id,
+        LTRIM(RTRIM(R.CODARTICULO)),
+        LTRIM(RTRIM(R.DESCRIPCION)),
+        ISNULL(gi.granel_sku, ''),
+        ISNULL(gi.liters_per_unit, 0),
+        LTRIM(RTRIM(RL.CODARTICULO)),
+        LTRIM(RTRIM(RL.DESCRIPCION)),
+        CASE
+            WHEN LTRIM(RTRIM(RL.CODARTICULO)) LIKE 'F%'       THEN 'granel'
+            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.1'     THEN 'quimico'
+            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.2'     THEN 'envase'
+            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.3'     THEN 'etiqueta'
+            WHEN LTRIM(RTRIM(ACOMP.CodStock)) = '3.3.1.4'     THEN 'fragancia'
+            ELSE                                                     'envase'
+        END,
+        RL.CANTIDAD,
+        ISNULL(NULLIF(LTRIM(RTRIM(RL.MEDIDA)), ''), 'Uni'),
+        -- Marcar inactivos los productos discontinuados (descripción 'ZZZ...')
+        CASE WHEN LTRIM(RTRIM(R.DESCRIPCION)) LIKE 'ZZZ%' THEN 0 ELSE 1 END
+    FROM [GestionProlimpio].[dbo].[RecetasLineas] RL
+    JOIN [GestionProlimpio].[dbo].[Recetas] R
+        ON RL.RECETA = R.RECETA
+    -- Solo productos terminados activos de familia 1.1
+    JOIN [GestionProlimpio].[dbo].[Articulos] APROD
+        ON LTRIM(RTRIM(APROD.CodArticulo)) = LTRIM(RTRIM(R.CODARTICULO))
+    INNER JOIN [GestionProlimpio].[dbo].[Grupos] GPROD
+        ON APROD.Grupo = GPROD.Grupo
+    LEFT JOIN granel_info gi
+        ON gi.RECETA = RL.RECETA AND gi.rn = 1
+    -- ACOMP: componente de la línea de receta (para CodStock → component_type)
+    JOIN [GestionProlimpio].[dbo].[Articulos] ACOMP
+        ON LTRIM(RTRIM(ACOMP.CodArticulo)) = LTRIM(RTRIM(RL.CODARTICULO))
+    WHERE LTRIM(RTRIM(R.CODARTICULO)) NOT LIKE 'F%'
+      AND R.CANTIDAD = 1
+      AND LTRIM(RTRIM(GPROD.Grupo)) = '1.1'
+      AND APROD.NoDisponible = 0;
+
+    PRINT 'Recetas producto cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
+
+    UPDATE sk
+    SET sk.family_code = LTRIM(RTRIM(sa.grupo_code)),
+        sk.is_finished = CASE
+            WHEN LTRIM(RTRIM(sa.grupo_code)) = '1.1' THEN 1
+            ELSE 0 END
+    FROM gold.dim_sku sk
+    JOIN stg.csv_articulos sa
+        ON LTRIM(RTRIM(sa.sku_code)) = sk.sku_code
+    WHERE sk.tenant_id = 100;
+    PRINT 'family_code/is_finished actualizados en dim_sku.';
+END;
+GO
+
+-- ────────────────────────────────────────────────────────────
+-- SP 3: sp_refresh_sku_liters
+--   Actualiza liters_per_unit en dim_sku. 3 capas de prioridad:
+--   CAPA 1 (mayor): manual — nunca sobreescribir
+--   CAPA 2 (media): desde dim_recipe_product (liters_per_unit real de receta)
+--   CAPA 3 (menor): patrón sobre descripción (auto)
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_refresh_sku_liters
+    @tenant_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- CAPA 3: patrón sobre descripción (orden mayor→menor para evitar falsos matches)
+    UPDATE gold.dim_sku
+    SET liters_per_unit = CASE
+        WHEN LOWER(sku_name) LIKE '%17900 l%'  THEN 17900.0
+        WHEN LOWER(sku_name) LIKE '%11900 l%'  THEN 11900.0
+        WHEN LOWER(sku_name) LIKE '%7900 l%'   THEN 7900.0
+        WHEN LOWER(sku_name) LIKE '%4900 l%'   THEN 4900.0
+        WHEN LOWER(sku_name) LIKE '%2900 l%'   THEN 2900.0
+        WHEN LOWER(sku_name) LIKE '%50 l%'     THEN 50.0
+        WHEN LOWER(sku_name) LIKE '%30 l%'     THEN 30.0
+        WHEN LOWER(sku_name) LIKE '%10 l%'     THEN 10.0
+        WHEN LOWER(sku_name) LIKE '%5 l%'      THEN 5.0
+        WHEN LOWER(sku_name) LIKE '%3 l%'      THEN 3.0
+        WHEN LOWER(sku_name) LIKE '%2 l%'      THEN 2.0
+        WHEN LOWER(sku_name) LIKE '%1.5 l%'    THEN 1.5
+        WHEN LOWER(sku_name) LIKE '%1.25 l%'   THEN 1.25
+        WHEN LOWER(sku_name) LIKE '%1 l%'      THEN 1.0
+        WHEN LOWER(sku_name) LIKE '%1lt%'      THEN 1.0
+        WHEN LOWER(sku_name) LIKE '%1l %'      THEN 1.0
+        WHEN LOWER(sku_name) LIKE '%500 ml%'   THEN 0.5
+        WHEN LOWER(sku_name) LIKE '%500ml%'    THEN 0.5
+        WHEN LOWER(sku_name) LIKE '%300 ml%'   THEN 0.3
+        WHEN LOWER(sku_name) LIKE '%250 ml%'   THEN 0.25
+        WHEN LOWER(sku_name) LIKE '%240 ml%'   THEN 0.24
+        WHEN LOWER(sku_name) LIKE '%150 ml%'   THEN 0.15
+        WHEN LOWER(sku_name) LIKE '%120 ml%'   THEN 0.12
+        WHEN LOWER(sku_name) LIKE '%100 ml%'   THEN 0.1
+        WHEN LOWER(sku_name) LIKE '%60 ml%'    THEN 0.06
+        WHEN LOWER(sku_name) LIKE '%30 ml%'    THEN 0.03
+        ELSE NULL
+    END,
+    liters_source = CASE
+        WHEN LOWER(sku_name) LIKE '%17900 l%' OR LOWER(sku_name) LIKE '%11900 l%'
+          OR LOWER(sku_name) LIKE '%7900 l%'  OR LOWER(sku_name) LIKE '%4900 l%'
+          OR LOWER(sku_name) LIKE '%2900 l%'  OR LOWER(sku_name) LIKE '%50 l%'
+          OR LOWER(sku_name) LIKE '%30 l%'    OR LOWER(sku_name) LIKE '%10 l%'
+          OR LOWER(sku_name) LIKE '%5 l%'     OR LOWER(sku_name) LIKE '%3 l%'
+          OR LOWER(sku_name) LIKE '%2 l%'     OR LOWER(sku_name) LIKE '%1.5 l%'
+          OR LOWER(sku_name) LIKE '%1 l%'     OR LOWER(sku_name) LIKE '%1lt%'
+          OR LOWER(sku_name) LIKE '%500 ml%'  OR LOWER(sku_name) LIKE '%500ml%'
+          OR LOWER(sku_name) LIKE '%300 ml%'  OR LOWER(sku_name) LIKE '%250 ml%'
+          OR LOWER(sku_name) LIKE '%150 ml%'  OR LOWER(sku_name) LIKE '%100 ml%'
+          OR LOWER(sku_name) LIKE '%60 ml%'   OR LOWER(sku_name) LIKE '%30 ml%'
+            THEN 'auto'
+        ELSE 'sin_datos'
+    END
+    WHERE tenant_id = @tenant_id
+      AND ISNULL(liters_source, '') NOT IN ('manual', 'recipe');
+
+    -- CAPA 2: desde receta nivel 2 (sobreescribe 'auto' y 'sin_datos')
+    UPDATE s
+    SET s.liters_per_unit = r.liters_per_unit,
+        s.liters_source   = 'recipe'
+    FROM gold.dim_sku s
+    JOIN (
+        SELECT DISTINCT product_sku, liters_per_unit
+        FROM gold.dim_recipe_product
+        WHERE tenant_id = @tenant_id
+          AND liters_per_unit > 0
+    ) r ON s.sku_code  = r.product_sku
+       AND s.tenant_id = @tenant_id
+    WHERE ISNULL(s.liters_source, '') NOT IN ('manual');
+
+    -- Reporte de casos sin datos (para corrección manual)
+    SELECT sku_code, sku_name, 'Sin litros detectados' AS issue
+    FROM gold.dim_sku
+    WHERE tenant_id       = @tenant_id
+      AND liters_per_unit IS NULL
+      AND is_active        = 1
+      AND LOWER(sku_name) NOT LIKE '%materia prima%'
+      AND LOWER(sku_name) NOT LIKE '%granel%'
+      AND LOWER(sku_name) NOT LIKE '%(mp)%'
+    ORDER BY sku_name;
+
+    PRINT 'liters_per_unit actualizado. Ver tabla arriba para casos sin datos.';
+END;
+GO
+
+-- ────────────────────────────────────────────────────────────
+-- SP 4: sp_refresh_component_stock
+--   Grupo '2.3' (F1, F2, F20…)      → stock via DOYSTOCKDP
+--   Grupo '3.1' (MP, envases, etc.)  → stock desde movimientos Lineas2
+--   Filtro: INNER JOIN Grupos; excluye 'ZZ%', 'MER%', '221802', 'MP03'.
+--           Sin LlevaStock/NoDisponible (NoDisponible=1 ≠ inactivo en MP)
+--   component_type por CodStock (subfamilia real de Macrosoft)
+--   Clamping negativo: ABS < 5000 → 0; ABS >= 5000 → -1 (override manual)
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_refresh_component_stock
+    @tenant_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @today DATE = CAST(GETDATE() AS DATE);
+
+    DELETE FROM gold.fact_component_stock
+    WHERE tenant_id = @tenant_id AND snapshot_date = @today;
+
+    -- ── Bloque 1: Graneles (Grupo '2.3') — DOYSTOCKDP ───────────────────────
+    INSERT INTO gold.fact_component_stock (
+        tenant_id, component_sku, component_name, component_type,
+        store_code, stock_units, unit_of_measure,
+        snapshot_date, is_critical, is_low, stock_min
+    )
+    SELECT
+        @tenant_id,
+        LTRIM(RTRIM(A.CodArticulo)),
+        LTRIM(RTRIM(A.Descripcion)),
+        'granel',
+        'F',
+        ISNULL([GestionProlimpio].[dbo].DOYSTOCKDP(@today, A.CodArticulo, 'F'), 0),
+        'Uni',
+        @today,
+        CASE WHEN ISNULL([GestionProlimpio].[dbo].DOYSTOCKDP(@today, A.CodArticulo, 'F'), 0) <= 0
+             THEN 1 ELSE 0 END,
+        CASE WHEN ISNULL([GestionProlimpio].[dbo].DOYSTOCKDP(@today, A.CodArticulo, 'F'), 0)
+                  < ISNULL(A.StockMin, 0)
+             THEN 1 ELSE 0 END,
+        A.StockMin
+    FROM [GestionProlimpio].[dbo].[Articulos] A
+    INNER JOIN [GestionProlimpio].[dbo].[Grupos]   G  ON A.Grupo    = G.Grupo
+    INNER JOIN [GestionProlimpio].[dbo].[StockArt] SA ON A.CodStock = SA.CodStock
+    WHERE LTRIM(RTRIM(G.Grupo)) = '2.3'
+      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zz%'
+      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zzz%'
+      AND A.CodArticulo NOT LIKE 'MER%'
+      AND A.CodArticulo NOT IN ('221802', 'MP03');
+
+    -- ── Bloque 2: MP/Envases/Etiquetas/Fragancias (Grupo '3.1') ─────────────
+    -- Stock = entradas - salidas (movimientos históricos completos).
+    -- Clamping: negativo pequeño (ABS < 5000) → 0; grande → -1 (marcar manual).
+    ;WITH entradas AS (
+        SELECT
+            LTRIM(RTRIM(L.CodArt))                AS CodArt,
+            SUM(L.CantidadDebe - L.CantidadHaber) AS qty
+        FROM [GestionProlimpio].[dbo].[Lineas2] L
+        JOIN [GestionProlimpio].[dbo].[Cabezal2] C
+            ON  L.Documento = C.DOCUMENTO
+            AND L.NroFact   = C.NROFACT
+            AND L.NroDoc    = C.NRODOC
+        WHERE (
+            (C.TIPDOC = 'C'  AND C.TIPO = 'P'
+                AND L.Documento IN ('06','07'))
+            OR
+            (C.TIPDOC = 'ST'
+                AND L.Documento IN ('11','111','120','32','CR','269','247','246'))
+        )
+          AND L.CantidadDebe > L.CantidadHaber
+        GROUP BY LTRIM(RTRIM(L.CodArt))
+    ),
+    salidas AS (
+        SELECT
+            LTRIM(RTRIM(L.CodArt))                AS CodArt,
+            SUM(L.CantidadHaber - L.CantidadDebe) AS qty
+        FROM [GestionProlimpio].[dbo].[Lineas2] L
+        JOIN [GestionProlimpio].[dbo].[Cabezal2] C
+            ON  L.Documento = C.DOCUMENTO
+            AND L.NroFact   = C.NROFACT
+            AND L.NroDoc    = C.NRODOC
+        WHERE (
+            (C.TIPDOC = 'ST' AND L.Documento IN ('111','112','122','270'))
+            OR
+            (C.TIPDOC = 'C'  AND L.Documento IN ('08'))
+            OR
+            (C.TIPDOC = 'V'  AND C.TIPO = 'C')
+        )
+          AND L.CantidadHaber > L.CantidadDebe
+        GROUP BY LTRIM(RTRIM(L.CodArt))
+    )
+    INSERT INTO gold.fact_component_stock (
+        tenant_id, component_sku, component_name, component_type,
+        store_code, stock_units, unit_of_measure,
+        snapshot_date, is_critical, is_low, stock_min
+    )
+    SELECT
+        @tenant_id,
+        LTRIM(RTRIM(A.CodArticulo)),
+        LTRIM(RTRIM(A.Descripcion)),
+        CASE LTRIM(RTRIM(A.CodStock))
+            WHEN '3.3.1.1' THEN 'quimico'
+            WHEN '3.3.1.2' THEN 'envase'
+            WHEN '3.3.1.3' THEN 'etiqueta'
+            WHEN '3.3.1.4' THEN 'fragancia'
+            ELSE                'quimico'
+        END,
+        'F',
+        stk.stock_calc,
+        'Uni',
+        @today,
+        CASE WHEN stk.stock_calc <= 0 THEN 1 ELSE 0 END,
+        CASE WHEN stk.stock_calc < ISNULL(A.StockMin, 0) THEN 1 ELSE 0 END,
+        A.StockMin
+    FROM [GestionProlimpio].[dbo].[Articulos] A
+    INNER JOIN [GestionProlimpio].[dbo].[Grupos]   G  ON A.Grupo    = G.Grupo
+    INNER JOIN [GestionProlimpio].[dbo].[StockArt] SA ON A.CodStock = SA.CodStock
+    LEFT JOIN entradas e ON e.CodArt = LTRIM(RTRIM(A.CodArticulo))
+    LEFT JOIN salidas  s ON s.CodArt = LTRIM(RTRIM(A.CodArticulo))
+    CROSS APPLY (
+        SELECT CASE
+            WHEN ISNULL(e.qty, 0) - ISNULL(s.qty, 0) >= 0
+                THEN ISNULL(e.qty, 0) - ISNULL(s.qty, 0)
+            WHEN ABS(ISNULL(e.qty, 0) - ISNULL(s.qty, 0)) < 5000
+                THEN 0.0
+            ELSE -1.0
+        END AS stock_calc
+    ) stk
+    WHERE LTRIM(RTRIM(G.Grupo)) = '3.1'
+      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zz%'
+      AND LOWER(LTRIM(RTRIM(A.Descripcion))) NOT LIKE 'zzz%'
+      AND A.CodArticulo NOT LIKE 'MER%'
+      AND A.CodArticulo NOT IN ('221802', 'MP03');
+
+    -- Actualizar stock efectivo = stock_units + OC pendientes
+    UPDATE cs
+    SET cs.units_on_order  = ISNULL(po.units_pending, 0),
+        cs.stock_effective = cs.stock_units + ISNULL(po.units_pending, 0)
+    FROM gold.fact_component_stock cs
+    LEFT JOIN (
+        SELECT component_sku, SUM(units_pending) AS units_pending
+        FROM gold.fact_purchase_orders
+        WHERE tenant_id = @tenant_id AND status = 'Pendiente'
+        GROUP BY component_sku
+    ) po ON cs.component_sku = po.component_sku
+    WHERE cs.tenant_id    = @tenant_id
+      AND cs.snapshot_date = @today;
+
+    DECLARE @n INT = @@ROWCOUNT;
+    PRINT 'Stock de componentes actualizado: ' + CAST(@n AS NVARCHAR(20)) + ' filas';
+END;
+GO
+
+-- ────────────────────────────────────────────────────────────
+-- SP 5: sp_refresh_production_orders
+--   Órdenes de producción ejecutadas (Documento='112', FACTURADO=1)
+--   Casing: Lineas2 mixedCase, Cabezal2 UPPERCASE
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_refresh_production_orders
+    @tenant_id INT,
+    @desde     DATE = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET @desde = ISNULL(@desde, DATEADD(MONTH, -3, GETDATE()));
+
+    DELETE FROM gold.fact_production_orders
+    WHERE tenant_id       = @tenant_id
+      AND production_date >= @desde;
+
+    INSERT INTO gold.fact_production_orders (
+        tenant_id, production_date, iso_year_week,
+        sku_code, nro_doc, units_produced,
+        liters_produced, operator
+    )
+    SELECT
+        @tenant_id,
+        CAST(L.Fecha AS DATE),
+        d.iso_year_week,
+        LTRIM(RTRIM(L.CodArt)),
+        LTRIM(RTRIM(C.NRODOC)),
+        SUM(L.CantidadHaber),
+        SUM(L.CantidadHaber * ISNULL(sk.liters_per_unit, 0)),
+        MAX(LTRIM(RTRIM(C.USUARIO)))
+    FROM [GestionProlimpio].[dbo].[Lineas2] L
+    JOIN [GestionProlimpio].[dbo].[Cabezal2] C
+        ON  L.Documento = C.DOCUMENTO
+        AND L.NroFact   = C.NROFACT
+        AND L.NroDoc    = C.NRODOC
+    JOIN gold.dim_date d
+        ON d.date = CAST(L.Fecha AS DATE)
+    LEFT JOIN gold.dim_sku sk
+        ON  sk.tenant_id = @tenant_id
+        AND sk.sku_code  = LTRIM(RTRIM(L.CodArt))
+    WHERE L.Documento  = '112'
+      AND C.FACTURADO  = 1
+      AND CAST(L.Fecha AS DATE) >= @desde
+    GROUP BY CAST(L.Fecha AS DATE),
+             d.iso_year_week,
+             LTRIM(RTRIM(L.CodArt)),
+             LTRIM(RTRIM(C.NRODOC));
+
+    PRINT 'Órdenes de producción cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
+END;
+GO
+
+-- ────────────────────────────────────────────────────────────
+-- SP 6: sp_refresh_purchase_orders
+--   OC de componentes y MP (Documento='26'), todos los estados.
+--   Casing: Lineas2 mixedCase, Cabezal2 UPPERCASE
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_refresh_purchase_orders
+    @tenant_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM gold.fact_purchase_orders WHERE tenant_id = @tenant_id;
+
+    INSERT INTO gold.fact_purchase_orders (
+        tenant_id, order_date, component_sku, component_name,
+        nro_doc, units_ordered, units_pending, status, total_cost
+    )
+    SELECT
+        @tenant_id,
+        CAST(L.Fecha AS DATE),
+        LTRIM(RTRIM(L.CodArt)),
+        LTRIM(RTRIM(A.Descripcion)),
+        LTRIM(RTRIM(C.NRODOC)),
+        ABS(SUM(L.CantidadDebe)),
+        ABS(SUM(CASE WHEN C.FACTURADO = 0 THEN L.CantidadDebe ELSE 0 END)),
+        MAX(CASE WHEN C.FACTURADO = 0 THEN 'Pendiente' ELSE 'Recibido' END),
+        SUM(L.TotalLinea)
+    FROM [GestionProlimpio].[dbo].[Lineas2] L
+    JOIN [GestionProlimpio].[dbo].[Cabezal2] C
+        ON  L.Documento = C.DOCUMENTO
+        AND L.NroFact   = C.NROFACT
+        AND L.NroDoc    = C.NRODOC
+    JOIN [GestionProlimpio].[dbo].[Articulos] A
+        ON A.CodArticulo = L.CodArt
+    WHERE L.Documento = '26'
+      AND L.Fecha     >= DATEADD(MONTH, -6, GETDATE())
+    GROUP BY CAST(L.Fecha AS DATE),
+             LTRIM(RTRIM(L.CodArt)),
+             LTRIM(RTRIM(A.Descripcion)),
+             LTRIM(RTRIM(C.NRODOC));
+
+    PRINT 'Órdenes de compra cargadas: ' + CAST(@@ROWCOUNT AS NVARCHAR(20));
+END;
+GO
+
+-- ────────────────────────────────────────────────────────────
+-- SP 7: sp_refresh_production_plan_weekly
+--   Recalcula el plan de producción para las próximas 8 semanas.
+--   Cruza: forecast + stock + recetas + componentes bloqueantes.
+--   Nota: GREATEST no disponible en SQL Server < 2022; se usa CASE WHEN.
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_refresh_production_plan_weekly
+    @tenant_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @current_week NCHAR(8) = (
+        SELECT iso_year_week FROM gold.dim_date
+        WHERE date = CAST(GETDATE() AS DATE)
+    );
+
+    DELETE FROM gold.fact_production_plan_weekly
+    WHERE tenant_id   = @tenant_id
+      AND iso_year_week >= @current_week;
+
+    WITH forecast_weekly AS (
+        SELECT
+            sku_code,
+            iso_year_week,
+            SUM(predicted_units) AS predicted_units_week
+        FROM gold.fact_demand_forecast
+        WHERE tenant_id    = @tenant_id
+          AND is_active     = 1
+          AND forecast_date >= CAST(GETDATE() AS DATE)
+        GROUP BY sku_code, iso_year_week
+    ),
+    forecast_30d AS (
+        SELECT
+            sku_code,
+            SUM(predicted_units) AS predicted_units_30d
+        FROM gold.fact_demand_forecast
+        WHERE tenant_id    = @tenant_id
+          AND is_active     = 1
+          AND forecast_date BETWEEN CAST(GETDATE() AS DATE)
+                                AND DATEADD(DAY, 30, GETDATE())
+        GROUP BY sku_code
+    ),
+    stock_current AS (
+        SELECT
+            sk.sku_code,
+            ISNULL(MAX(fsw.stock_units), 0) AS stock_current
+        FROM gold.dim_sku sk
+        LEFT JOIN gold.fact_stock_weekly fsw
+            ON  fsw.sku_id        = sk.sku_id
+            AND fsw.tenant_id     = @tenant_id
+            AND fsw.iso_year_week = (
+                SELECT MAX(iso_year_week)
+                FROM gold.fact_stock_weekly
+                WHERE tenant_id = @tenant_id
+            )
+        WHERE sk.tenant_id = @tenant_id
+        GROUP BY sk.sku_code
+    ),
+    blocking AS (
+        SELECT
+            rp.product_sku,
+            STRING_AGG(
+                cs.component_sku + ' (' + CAST(cs.stock_units AS NVARCHAR(20)) + ')',
+                ', '
+            ) AS blocking_components
+        FROM gold.dim_recipe_product rp
+        JOIN gold.fact_component_stock cs
+            ON  cs.tenant_id     = @tenant_id
+            AND cs.component_sku = rp.component_sku
+            AND cs.snapshot_date = CAST(GETDATE() AS DATE)
+            AND cs.is_critical   = 1
+        WHERE rp.tenant_id = @tenant_id
+          AND rp.is_active  = 1
+        GROUP BY rp.product_sku
+    )
+    INSERT INTO gold.fact_production_plan_weekly (
+        tenant_id, sku_code, iso_year_week,
+        predicted_units_week, predicted_units_30d,
+        stock_current, stock_final,
+        units_to_produce, liters_to_produce,
+        days_of_coverage, is_critical,
+        has_component_shortage, blocking_components
+    )
+    SELECT
+        @tenant_id,
+        fw.sku_code,
+        fw.iso_year_week,
+        fw.predicted_units_week,
+        ISNULL(f30.predicted_units_30d, 0),
+        ISNULL(sc.stock_current, 0),
+        ISNULL(sc.stock_current, 0),
+        -- units_to_produce: max(0, prediccion - stock)
+        CASE WHEN fw.predicted_units_week - ISNULL(sc.stock_current, 0) > 0
+             THEN fw.predicted_units_week - ISNULL(sc.stock_current, 0)
+             ELSE 0 END,
+        -- liters_to_produce: units_to_produce * liters_per_unit
+        CASE WHEN fw.predicted_units_week - ISNULL(sc.stock_current, 0) > 0
+             THEN (fw.predicted_units_week - ISNULL(sc.stock_current, 0))
+                  * ISNULL(sk.liters_per_unit, 0)
+             ELSE 0 END,
+        -- days_of_coverage: stock / (demanda_semanal / 5 días)
+        CASE WHEN fw.predicted_units_week > 0
+             THEN CAST(ISNULL(sc.stock_current, 0) AS DECIMAL(18,4))
+                  / (CAST(fw.predicted_units_week AS DECIMAL(18,4)) / 5.0)
+             ELSE NULL END,
+        -- crítico si cobertura < 7 días
+        CASE WHEN ISNULL(sc.stock_current, 0)
+                  < (CAST(fw.predicted_units_week AS DECIMAL(18,4)) / 5.0 * 7)
+             THEN 1 ELSE 0 END,
+        CASE WHEN b.blocking_components IS NOT NULL THEN 1 ELSE 0 END,
+        b.blocking_components
+    FROM forecast_weekly fw
+    LEFT JOIN forecast_30d  f30 ON f30.sku_code  = fw.sku_code
+    LEFT JOIN stock_current  sc ON sc.sku_code   = fw.sku_code
+    LEFT JOIN gold.dim_sku   sk ON sk.sku_code    = fw.sku_code
+                                AND sk.tenant_id   = @tenant_id
+                                AND sk.family_code  = '1.1'
+                                AND sk.is_finished  = 1
+    LEFT JOIN blocking        b ON b.product_sku = fw.sku_code;
+
+    PRINT 'Plan semanal recalculado para tenant ' + CAST(@tenant_id AS NVARCHAR(20));
+END;
+GO
+
+-- ────────────────────────────────────────────────────────────
+-- Orquestador diario: ejecuta todos los SPs en orden correcto
+-- ────────────────────────────────────────────────────────────
+CREATE OR ALTER PROCEDURE gold.sp_refresh_production_all
+    @tenant_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    EXEC gold.sp_load_recipe_granel            @tenant_id;
+    EXEC gold.sp_load_recipe_product           @tenant_id;
+    EXEC gold.sp_refresh_component_stock       @tenant_id;
+    EXEC gold.sp_refresh_purchase_orders       @tenant_id;
+    EXEC gold.sp_refresh_production_orders     @tenant_id;
+    EXEC gold.sp_refresh_sku_liters            @tenant_id;
+    EXEC gold.sp_refresh_production_plan_weekly @tenant_id;
+    PRINT 'Módulo producción actualizado completamente para tenant '
+          + CAST(@tenant_id AS NVARCHAR(20));
+END;
+GO
