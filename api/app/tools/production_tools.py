@@ -154,33 +154,24 @@ async def get_production_forecast(
 ) -> dict[str, Any]:
     schema = get_schema(tenant_id)
     pg = is_postgres(tenant_id)
-    limit = semanas * 50
-    top_clause  = "" if pg else f"TOP {limit}"
+    # Max 15 rows by default; 30 hard cap regardless of semanas
+    limit = min(semanas * 15, 30)
+    top_clause   = "" if pg else f"TOP {limit}"
     limit_clause = f"LIMIT {limit}" if pg else ""
-    cat_col  = "NULL AS category_name," if pg else "cat.category_name,"
-    cat_join = "" if pg else f"""LEFT JOIN gold.dim_category cat
-            ON  cat.tenant_id   = ppw.tenant_id
-            AND cat.category_id = sk.category_id"""
     iso_week = current_iso_week_expr(tenant_id)
 
     _one = "TRUE" if pg else "1"
     critico_filter = f"AND ppw.is_critical = {_one}" if solo_criticos else ""
-    familia_filter = "AND cat.category_name = ?" if familia and not pg else ""
     params_list: list[Any] = [tenant_id]
-    if familia and not pg:
-        params_list.append(familia)
 
+    # 10 columns only — category_name, liters_per_unit, iso_year_week,
+    # predicted_units_30d and stock_final removed to cut token usage
     sql = f"""
         SELECT {top_clause}
             sk.sku_code,
             sk.sku_name,
-            sk.liters_per_unit,
-            {cat_col}
-            ppw.iso_year_week,
             ppw.predicted_units_week,
-            ppw.predicted_units_30d,
             ppw.stock_current,
-            ppw.stock_final,
             ppw.units_to_produce,
             ppw.liters_to_produce,
             ppw.days_of_coverage,
@@ -192,15 +183,12 @@ async def get_production_forecast(
             ON  sk.tenant_id   = ppw.tenant_id
             AND sk.sku_code    = ppw.sku_code
             AND sk.family_code = '1.1'
-            AND sk.is_finished = {'TRUE' if pg else '1'}
-        {cat_join}
+            AND sk.is_finished = {_one}
         WHERE ppw.tenant_id   = ?
           AND ppw.iso_year_week >= {iso_week}
           {critico_filter}
-          {familia_filter}
         ORDER BY ppw.is_critical DESC,
-                 ppw.days_of_coverage ASC,
-                 ppw.iso_year_week,
+                 ppw.days_of_coverage ASC {'NULLS LAST' if pg else ''},
                  ppw.units_to_produce DESC
         {limit_clause};
     """
@@ -241,7 +229,8 @@ async def get_component_requirements(
         WHERE rp.tenant_id   = ?
           AND rp.product_sku = ?
           AND rp.is_active   = 1
-        ORDER BY rp.component_type, rp.component_sku;
+        ORDER BY qty_missing DESC, rp.component_type, rp.component_sku
+        {'LIMIT 30' if pg else ''};
     """
     n2_rows = await execute_query_tenant(
         sql_n2,
@@ -280,7 +269,8 @@ async def get_component_requirements(
             AND cs.snapshot_date = {today}
         WHERE rg.tenant_id = ?
           AND rg.is_active  = 1
-        ORDER BY rg.component_type, rg.component_sku;
+        ORDER BY qty_missing DESC, rg.component_type, rg.component_sku
+        {'LIMIT 30' if pg else ''};
     """
     n1_rows = await execute_query_tenant(
         sql_n1,
@@ -400,22 +390,17 @@ async def get_coverage_alert(
 ) -> dict[str, Any]:
     schema = get_schema(tenant_id)
     pg = is_postgres(tenant_id)
-    cat_col  = "NULL AS category_name," if pg else "cat.category_name,"
-    cat_join = "" if pg else f"""LEFT JOIN gold.dim_category cat
-            ON  cat.tenant_id   = ppw.tenant_id
-            AND cat.category_id = sk.category_id"""
     iso_week = current_iso_week_expr(tenant_id)
+    _one = "TRUE" if pg else "1"
+    limit_clause = "LIMIT 10" if pg else ""
+    top_clause   = "" if pg else "TOP 10"
+    nulls_last   = "NULLS LAST" if pg else ""
 
+    # 6 columns, LIMIT 10 always — enough for actionable decisions
     sql = f"""
-        SELECT
+        SELECT {top_clause}
             ppw.sku_code,
             sk.sku_name,
-            {cat_col}
-            ppw.iso_year_week,
-            ppw.predicted_units_week,
-            ppw.stock_current,
-            ppw.units_to_produce,
-            ppw.liters_to_produce,
             ppw.days_of_coverage,
             ppw.is_critical,
             ppw.has_component_shortage,
@@ -425,18 +410,17 @@ async def get_coverage_alert(
             ON  sk.tenant_id   = ppw.tenant_id
             AND sk.sku_code    = ppw.sku_code
             AND sk.family_code = '1.1'
-            AND sk.is_finished = {'TRUE' if pg else '1'}
-        {cat_join}
+            AND sk.is_finished = {_one}
         WHERE ppw.tenant_id    = ?
           AND ppw.iso_year_week = (
-              -- Primera semana disponible (>= semana actual)
               SELECT MIN(p2.iso_year_week)
               FROM {schema}.fact_production_plan_weekly p2
               WHERE p2.tenant_id    = ?
                 AND p2.iso_year_week >= {iso_week}
           )
-        ORDER BY ppw.days_of_coverage ASC,
-                 ppw.units_to_produce DESC;
+        ORDER BY ppw.is_critical DESC,
+                 ppw.days_of_coverage ASC {nulls_last}
+        {limit_clause};
     """
     rows = await execute_query_tenant(sql, (tenant_id, tenant_id), tenant_id=tenant_id)
 
@@ -484,71 +468,48 @@ async def get_component_stock(
     }
     tipo_norm = tipo if tipo in TIPO_MAP else "todos"
 
+    schema = get_schema(tenant_id)
+    pg = is_postgres(tenant_id)
+    today = current_date_expr(tenant_id)
+    _one = "TRUE" if pg else "1"
+    top_clause   = "" if pg else "TOP 20"
+    limit_clause = "LIMIT 20" if pg else ""
+    nulls_last   = "NULLS LAST" if pg else ""
+
     if tipo_norm == "criticos":
-        _one = "TRUE" if is_postgres(tenant_id) else "1"
         where_extra = f"AND cs.is_critical = {_one}"
         extra_params: tuple[Any, ...] = ()
     elif TIPO_MAP.get(tipo_norm) is not None:
         tipos = TIPO_MAP[tipo_norm]
         placeholders = ",".join(["?" for _ in tipos])
+        # For specific types, show critical/low first; still max 20
         where_extra = f"AND cs.component_type IN ({placeholders})"
         extra_params = tuple(tipos)
     else:
-        where_extra = ""
+        # 'todos' default: only show problem components (critical or below min)
+        where_extra = f"AND (cs.is_critical = {_one} OR cs.is_low = {_one})"
         extra_params = ()
 
-    schema = get_schema(tenant_id)
-    pg = is_postgres(tenant_id)
-    today = current_date_expr(tenant_id)
-
-    if pg:
-        lateral_join = f"""LEFT JOIN LATERAL (
-            SELECT STRING_AGG(
-                TO_CHAR(po2.order_date, 'YYYY-MM-DD') || ': ' ||
-                CAST(po2.units_pending AS VARCHAR(20)) || ' u',
-                ' | '
-            ) AS proximas_llegadas
-            FROM {schema}.fact_purchase_orders po2
-            WHERE po2.tenant_id     = cs.tenant_id
-              AND po2.component_sku = cs.component_sku
-              AND po2.status        = 'Pendiente'
-        ) po ON TRUE"""
-    else:
-        lateral_join = f"""OUTER APPLY (
-            SELECT STRING_AGG(
-                CONVERT(NVARCHAR(10), po2.order_date) + ': ' +
-                CAST(po2.units_pending AS NVARCHAR(20)) + ' u',
-                ' | '
-            ) AS proximas_llegadas
-            FROM {schema}.fact_purchase_orders po2
-            WHERE po2.tenant_id     = cs.tenant_id
-              AND po2.component_sku = cs.component_sku
-              AND po2.status        = 'Pendiente'
-        ) po"""
-
+    # No LATERAL/OUTER APPLY — removed purchase order subquery to cut tokens.
+    # The is_low / is_critical flags already reflect OC-adjusted stock_effective.
     sql = f"""
-        SELECT
+        SELECT {top_clause}
             cs.component_sku,
             cs.component_name,
             cs.component_type,
             cs.stock_units,
-            cs.units_on_order,
             cs.stock_effective,
             cs.unit_of_measure,
             cs.is_critical,
             cs.is_low,
-            cs.stock_min,
-            cs.snapshot_date,
-            po.proximas_llegadas
+            cs.stock_min
         FROM {schema}.fact_component_stock cs
-        {lateral_join}
         WHERE cs.tenant_id     = ?
           AND cs.snapshot_date = {today}
           {where_extra}
         ORDER BY cs.is_critical DESC,
-                 cs.is_low     DESC,
-                 cs.component_type,
-                 cs.component_sku;
+                 cs.is_low     DESC {nulls_last}
+        {limit_clause};
     """
     params = (tenant_id,) + extra_params
     rows = await execute_query_tenant(sql, params, tenant_id=tenant_id)
@@ -594,7 +555,8 @@ async def get_production_history(
           AND po.production_date >= {weeks_expr}
           {sku_filter}
         GROUP BY po.iso_year_week, po.sku_code, sk.sku_name
-        ORDER BY po.iso_year_week DESC, po.sku_code;
+        ORDER BY SUM(po.units_produced) DESC, po.iso_year_week DESC
+        {'LIMIT 10' if pg else ''};
     """
     prod_rows = await execute_query_tenant(
         sql_prod, (tenant_id, semanas) + sku_params, tenant_id=tenant_id
@@ -612,7 +574,8 @@ async def get_production_history(
           AND forecast_date <  {today}
           {sku_filter}
         GROUP BY iso_year_week, sku_code
-        ORDER BY iso_year_week DESC, sku_code;
+        ORDER BY iso_year_week DESC, sku_code
+        {'LIMIT 10' if pg else ''};
     """
     fc_rows = await execute_query_tenant(
         sql_fc, (tenant_id, semanas) + sku_params, tenant_id=tenant_id
@@ -630,7 +593,8 @@ async def get_production_history(
         WHERE tenant_id   = ?
           AND order_date  >= {weeks_ago_expr(tenant_id)}
         GROUP BY component_sku, component_name
-        ORDER BY total_cost DESC;
+        ORDER BY total_cost DESC
+        {'LIMIT 10' if pg else ''};
     """
     oc_rows = await execute_query_tenant(sql_oc, (tenant_id, semanas), tenant_id=tenant_id)
 
