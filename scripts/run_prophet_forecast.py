@@ -1,13 +1,14 @@
 """
 Prophet forecast runner — independiente de Power BI.
 
-Extrae ventas históricas de GestionProlimpio, entrena un modelo Prophet
-por SKU y guarda las predicciones en gold.fact_demand_forecast.
+Lee ventas históricas desde stg.[csv.ventas_historicas] en pymeconta_local
+(modo CSV bridge, misma red que los SPs de producción).
+Entrena un modelo Prophet por SKU y guarda en gold.fact_demand_forecast.
 Al finalizar recalcula gold.fact_production_plan_weekly.
 
 Uso:
-    python scripts/run_prophet_forecast.py --tenant 100
-    python scripts/run_prophet_forecast.py --tenant 100 --horizon 90 --version 1.1
+    python scripts/run_prophet_forecast.py --tenant 24
+    python scripts/run_prophet_forecast.py --tenant 24 --horizon 90 --version 1.1
 """
 
 from __future__ import annotations
@@ -36,45 +37,24 @@ MACROSOFT_CONN = (
 )
 GOLD_CONN = (
     "DRIVER={ODBC Driver 17 for SQL Server};"
-    "SERVER=localhost;DATABASE=pymeconta_local;"
+    "SERVER=.\\SQLEXPRESS;DATABASE=pymeconta_local;"
     "Trusted_Connection=yes;"
 )
 
-# ── Query de ventas históricas (validada en Power BI) ─────────────────────────
-# Incluye ventas de Fábrica (documentos base) y transferencias a Av Italia (doc 35)
+# ── Query de ventas históricas — MODO CSV Bridge ──────────────────────────────
+# Lee de stg.[csv.ventas_historicas] en pymeconta_local.
+# Para modo Linked Server: reemplazar por la query UNION ALL de
+# GestionProlimpio.dbo.Lineas + Cabezal + Articulos + StockArt.
 _QUERY_VENTAS = """
 SELECT
-    L.Fecha,
-    L.CodArt AS CodArticulo,
-    (L.CantidadHaber - L.CantidadDebe)
-        * CASE C.DebeHaber WHEN 'H' THEN -1 ELSE 1 END AS CantidadVendida,
-    'Fabrica' AS Origen
-FROM dbo.Lineas L
-JOIN dbo.Cabezal C
-    ON  L.Documento = C.Documento
-    AND L.NroFact   = C.NroFact
-    AND L.NroDoc    = C.NroDoc
-JOIN dbo.Articulos A ON A.CodArticulo = L.CodArt
-JOIN dbo.StockArt  S ON S.CodStock   = A.CodStock
-WHERE L.Documento IN ('002','01','0101','02','20','21','03','04','22','23')
-  AND L.Fecha >= '2022-01-01'
-  AND A.LlevaStock = 1
-
-UNION ALL
-
-SELECT
-    li.Fecha,
-    li.CodArt AS CodArticulo,
-    (li.CantidadDebe - li.CantidadHaber) AS CantidadVendida,
-    'Ave Italia' AS Origen
-FROM dbo.Lineas li
-JOIN dbo.deposito  dp ON li.Deposito    = dp.Deposito
-JOIN dbo.Articulos A  ON li.CodArt     = A.CodArticulo
-JOIN dbo.StockArt  S  ON A.CodStock    = S.CodStock
-WHERE li.Fecha     >= '2022-09-01'
-  AND li.Documento  = '35'
-  AND dp.Deposito   = 'I'
-  AND A.LlevaStock  = 1
+    TRY_CONVERT(DATE, Fecha)              AS Fecha,
+    LTRIM(RTRIM(CodArticulo))             AS CodArticulo,
+    TRY_CAST(CantidadVendida AS FLOAT)    AS CantidadVendida,
+    LTRIM(RTRIM(Origen))                  AS Origen
+FROM stg.[csv.ventas_historicas]
+WHERE TRY_CAST(CantidadVendida AS FLOAT) > 0
+  AND Fecha IS NOT NULL
+  AND CodArticulo IS NOT NULL
 """
 
 _MERGE_SQL = """
@@ -104,12 +84,13 @@ WHEN NOT MATCHED THEN
 
 
 def _fetch_sales(conn_str: str) -> pd.DataFrame:
-    log.info("Conectando a GestionProlimpio…")
+    log.info("Leyendo ventas desde stg.[csv.ventas_historicas] en pymeconta_local…")
     conn = pyodbc.connect(conn_str)
     df = pd.read_sql(_QUERY_VENTAS, conn)
     conn.close()
     df["Fecha"] = pd.to_datetime(df["Fecha"])
     df["CodArticulo"] = df["CodArticulo"].str.strip()
+    df["CantidadVendida"] = pd.to_numeric(df["CantidadVendida"], errors="coerce").fillna(0)
     return df[df["CantidadVendida"] > 0].copy()
 
 
@@ -220,7 +201,7 @@ def run_forecast(
     horizon_days: int = 60,
     model_version: str = "1.0",
 ) -> None:
-    datos = _fetch_sales(MACROSOFT_CONN)
+    datos = _fetch_sales(GOLD_CONN)   # CSV bridge: lee de stg.[csv.ventas_historicas]
     productos = datos["CodArticulo"].unique()
     log.info("%d productos a procesar", len(productos))
 

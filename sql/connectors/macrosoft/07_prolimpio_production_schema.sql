@@ -1,6 +1,6 @@
 -- ============================================================
 -- FASE 1 — TABLAS GOLD DE PRODUCCIÓN PROLIMPIO
--- Tenant: 100
+-- Tenant: 24
 -- Destino: pymeconta_local (schema gold)
 -- Todas idempotentes (IF NOT EXISTS / IF NOT EXISTS column)
 -- ============================================================
@@ -195,14 +195,14 @@ GO
 INSERT INTO gold.dim_reactor (tenant_id, reactor_code, reactor_name, capacity_liters, reactor_type)
 SELECT v.tenant_id, v.code, v.name, v.cap, v.tipo
 FROM (VALUES
-    (100, 'R1', 'Reactor pequeño 1', 200.0,  'pequeno'),
-    (100, 'R2', 'Reactor pequeño 2', 200.0,  'pequeno'),
-    (100, 'R3', 'Reactor grande 1',  5000.0, 'grande'),
-    (100, 'R4', 'Reactor grande 2',  5000.0, 'grande')
+    (24, 'R1', 'Reactor pequeño 1', 200.0,  'pequeno'),
+    (24, 'R2', 'Reactor pequeño 2', 200.0,  'pequeno'),
+    (24, 'R3', 'Reactor grande 1',  5000.0, 'grande'),
+    (24, 'R4', 'Reactor grande 2',  5000.0, 'grande')
 ) v(tenant_id, code, name, cap, tipo)
 WHERE NOT EXISTS (
     SELECT 1 FROM gold.dim_reactor
-    WHERE tenant_id = 100
+    WHERE tenant_id = 24
 );
 GO
 
