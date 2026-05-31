@@ -172,6 +172,18 @@ async def internal_chat(
             conversation_id=conv_id,
             vertical=cfg.vertical,
         )
+        # ── Token breakdown logging (tenant 24, first 20 queries) ──────────
+        from app.llm.token_logger import log_token_breakdown
+        log_token_breakdown(
+            tenant_id=auth.tenant_id,
+            query=payload.message,
+            system_prompt=system_prompt,
+            history=list(history),
+            total_input_tokens=result.tokens_input,
+            total_output_tokens=result.tokens_output,
+            tools_invoked=[t.name for t in result.tools_invoked],
+            response_text=result.response_text,
+        )
     except RuntimeError as e:
         duration = int((time.perf_counter() - t0) * 1000)
         await _persist_failure_audit(
