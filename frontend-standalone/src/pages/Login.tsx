@@ -93,7 +93,7 @@ export function Login() {
             margin="normal"
             required
             disabled={loading}
-            helperText="Identificador de tu empresa, ej: prolimpio"
+            helperText="Identificador de tu empresa (ej: prolimpio). Administradores del sistema: usar 'admin'"
           />
           <Button
             type="submit"

@@ -48,7 +48,45 @@ async def get_tenant_by_slug(slug: str) -> Tenant | None:
         "SELECT * FROM auth.tenants WHERE slug = ? AND is_active = 1;",
         (slug,),
     )
-    return _row_to_tenant(rows[0]) if rows else None
+    if rows:
+        return _row_to_tenant(rows[0])
+    # Fall back to PostgreSQL (standalone tenants like 'admin' live there)
+    return await _get_tenant_by_slug_pg(slug)
+
+
+async def _get_tenant_by_slug_pg(slug: str) -> Tenant | None:
+    import asyncio as _asyncio
+    import psycopg2 as _pg
+    import psycopg2.extras as _pgx
+    from app.db.connections import _PG_CONN_PARAMS
+
+    def _query() -> list:
+        conn = _pg.connect(**_PG_CONN_PARAMS)
+        try:
+            cur = conn.cursor(cursor_factory=_pgx.RealDictCursor)
+            cur.execute(
+                "SELECT * FROM auth.tenants WHERE slug = %s AND is_active = TRUE",
+                (slug,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    rows = await _asyncio.to_thread(_query)
+    if not rows:
+        return None
+    r = rows[0]
+    return Tenant(
+        id=r["id"],
+        name=r["name"],
+        slug=r["slug"],
+        vertical=r["vertical"],
+        plan=r.get("tenant_plan") or "starter",
+        is_active=bool(r["is_active"]),
+        created_at=r["created_at"],
+        trial_ends_at=r.get("trial_ends_at"),
+        platform_tenant_id=r.get("platform_tenant_id"),
+    )
 
 
 async def get_tenant_by_id(tenant_id: int) -> Tenant | None:
