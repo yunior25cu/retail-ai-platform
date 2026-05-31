@@ -16,7 +16,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.db.connection import execute_query
+from app.db.connection import execute_query  # retail tools — do not change
+from app.db.connections import (
+    execute_query_tenant,
+    get_schema,
+    is_postgres,
+    current_date_expr,
+    current_iso_week_expr,
+    weeks_ago_expr,
+)
 
 # ── Constantes de herramienta ─────────────────────────────────────────────────
 
@@ -144,18 +152,29 @@ async def get_production_forecast(
     familia: str | None = None,
     db: Any = None,
 ) -> dict[str, Any]:
+    schema = get_schema(tenant_id)
+    pg = is_postgres(tenant_id)
+    limit = semanas * 50
+    top_clause  = "" if pg else f"TOP {limit}"
+    limit_clause = f"LIMIT {limit}" if pg else ""
+    cat_col  = "NULL AS category_name," if pg else "cat.category_name,"
+    cat_join = "" if pg else f"""LEFT JOIN gold.dim_category cat
+            ON  cat.tenant_id   = ppw.tenant_id
+            AND cat.category_id = sk.category_id"""
+    iso_week = current_iso_week_expr(tenant_id)
+
     critico_filter = "AND ppw.is_critical = 1" if solo_criticos else ""
-    familia_filter = "AND cat.category_name = ?" if familia else ""
-    params: list[Any] = [tenant_id, semanas * 50]
-    if familia:
-        params.append(familia)
+    familia_filter = "AND cat.category_name = ?" if familia and not pg else ""
+    params_list: list[Any] = [tenant_id]
+    if familia and not pg:
+        params_list.append(familia)
 
     sql = f"""
-        SELECT TOP (?)
+        SELECT {top_clause}
             sk.sku_code,
             sk.sku_name,
             sk.liters_per_unit,
-            cat.category_name,
+            {cat_col}
             ppw.iso_year_week,
             ppw.predicted_units_week,
             ppw.predicted_units_30d,
@@ -167,30 +186,24 @@ async def get_production_forecast(
             ppw.is_critical,
             ppw.has_component_shortage,
             ppw.blocking_components
-        FROM gold.fact_production_plan_weekly ppw
-        JOIN gold.dim_sku sk
+        FROM {schema}.fact_production_plan_weekly ppw
+        JOIN {schema}.dim_sku sk
             ON  sk.tenant_id   = ppw.tenant_id
             AND sk.sku_code    = ppw.sku_code
             AND sk.family_code = '1.1'
-            AND sk.is_finished = 1
-        LEFT JOIN gold.dim_category cat
-            ON  cat.tenant_id = ppw.tenant_id
-            AND cat.category_id = sk.category_id
+            AND sk.is_finished = {'TRUE' if pg else '1'}
+        {cat_join}
         WHERE ppw.tenant_id   = ?
-          AND ppw.iso_year_week >= (
-              SELECT iso_year_week FROM gold.dim_date
-              WHERE date = CAST(GETDATE() AS DATE)
-          )
+          AND ppw.iso_year_week >= {iso_week}
           {critico_filter}
           {familia_filter}
         ORDER BY ppw.is_critical DESC,
                  ppw.days_of_coverage ASC,
                  ppw.iso_year_week,
-                 ppw.units_to_produce DESC;
+                 ppw.units_to_produce DESC
+        {limit_clause};
     """
-    # params: TOP n, tenant_id[, familia]
-    ordered_params = tuple([params[1], params[0]] + params[2:])
-    rows = await execute_query(sql, ordered_params)
+    rows = await execute_query_tenant(sql, tuple(params_list), tenant_id=tenant_id)
     return {"plan": rows}
 
 
@@ -201,74 +214,77 @@ async def get_component_requirements(
     units_to_produce: int,
     db: Any = None,
 ) -> dict[str, Any]:
-    # Nivel 2: envases + granel por unidad de producto
-    sql_n2 = """
+    schema = get_schema(tenant_id)
+    today = current_date_expr(tenant_id)
+
+    sql_n2 = f"""
         SELECT
             rp.component_sku,
             rp.component_name,
             rp.component_type,
-            rp.qty_per_unit * ?              AS qty_needed,
+            rp.qty_per_unit * ?                  AS qty_needed,
             rp.unit_of_measure,
-            ISNULL(cs.stock_units, 0)        AS stock_available,
-            ISNULL(cs.units_on_order, 0)     AS on_order,
-            ISNULL(cs.stock_effective, 0)    AS stock_effective,
-            CASE WHEN rp.qty_per_unit * ? > ISNULL(cs.stock_effective, 0)
-                 THEN rp.qty_per_unit * ? - ISNULL(cs.stock_effective, 0)
-                 ELSE 0 END                  AS qty_missing,
+            COALESCE(cs.stock_units, 0)           AS stock_available,
+            COALESCE(cs.units_on_order, 0)        AS on_order,
+            COALESCE(cs.stock_effective, 0)       AS stock_effective,
+            CASE WHEN rp.qty_per_unit * ? > COALESCE(cs.stock_effective, 0)
+                 THEN rp.qty_per_unit * ? - COALESCE(cs.stock_effective, 0)
+                 ELSE 0 END                       AS qty_missing,
             rp.granel_sku,
-            rp.liters_per_unit * ?           AS liters_needed
-        FROM gold.dim_recipe_product rp
-        LEFT JOIN gold.fact_component_stock cs
+            rp.liters_per_unit * ?               AS liters_needed
+        FROM {schema}.dim_recipe_product rp
+        LEFT JOIN {schema}.fact_component_stock cs
             ON  cs.tenant_id     = ?
             AND cs.component_sku = rp.component_sku
-            AND cs.snapshot_date = CAST(GETDATE() AS DATE)
+            AND cs.snapshot_date = {today}
         WHERE rp.tenant_id   = ?
           AND rp.product_sku = ?
           AND rp.is_active   = 1
         ORDER BY rp.component_type, rp.component_sku;
     """
-    n2_rows = await execute_query(
+    n2_rows = await execute_query_tenant(
         sql_n2,
         (units_to_produce, units_to_produce, units_to_produce,
          units_to_produce, tenant_id, tenant_id, sku_code),
+        tenant_id=tenant_id,
     )
 
-    # Nivel 1: MP necesaria para el granel (calculada desde liters_needed del nivel 2)
-    sql_n1 = """
+    sql_n1 = f"""
         SELECT
             rg.component_sku,
             rg.component_name,
             rg.component_type,
             rg.unit_of_measure,
-            rg.qty_per_liter * rp_agg.liters_needed AS qty_needed,
-            ISNULL(cs.stock_units, 0)                AS stock_available,
-            ISNULL(cs.stock_effective, 0)            AS stock_effective,
+            rg.qty_per_liter * rp_agg.liters_needed  AS qty_needed,
+            COALESCE(cs.stock_units, 0)               AS stock_available,
+            COALESCE(cs.stock_effective, 0)           AS stock_effective,
             CASE WHEN rg.qty_per_liter * rp_agg.liters_needed
-                      > ISNULL(cs.stock_effective, 0)
+                      > COALESCE(cs.stock_effective, 0)
                  THEN rg.qty_per_liter * rp_agg.liters_needed
-                      - ISNULL(cs.stock_effective, 0)
-                 ELSE 0 END                          AS qty_missing
-        FROM gold.dim_recipe_granel rg
+                      - COALESCE(cs.stock_effective, 0)
+                 ELSE 0 END                           AS qty_missing
+        FROM {schema}.dim_recipe_granel rg
         JOIN (
             SELECT granel_sku,
                    SUM(liters_per_unit) * ? AS liters_needed
-            FROM gold.dim_recipe_product
+            FROM {schema}.dim_recipe_product
             WHERE tenant_id   = ?
               AND product_sku = ?
               AND is_active   = 1
             GROUP BY granel_sku
         ) rp_agg ON rp_agg.granel_sku = rg.granel_sku
-        LEFT JOIN gold.fact_component_stock cs
+        LEFT JOIN {schema}.fact_component_stock cs
             ON  cs.tenant_id     = ?
             AND cs.component_sku = rg.component_sku
-            AND cs.snapshot_date = CAST(GETDATE() AS DATE)
+            AND cs.snapshot_date = {today}
         WHERE rg.tenant_id = ?
           AND rg.is_active  = 1
         ORDER BY rg.component_type, rg.component_sku;
     """
-    n1_rows = await execute_query(
+    n1_rows = await execute_query_tenant(
         sql_n1,
         (units_to_produce, tenant_id, sku_code, tenant_id, tenant_id),
+        tenant_id=tenant_id,
     )
 
     missing_n2 = [r for r in n2_rows if (r.get("qty_missing") or 0) > 0]
@@ -303,15 +319,16 @@ async def get_reactor_schedule(
     if tipo_reactor != "ambos":
         params = (tenant_id, tipo_reactor)
 
+    schema = get_schema(tenant_id)
     sql = f"""
         SELECT reactor_code, reactor_name, capacity_liters, reactor_type
-        FROM gold.dim_reactor
+        FROM {schema}.dim_reactor
         WHERE tenant_id = ?
           AND is_active  = 1
           {type_filter}
         ORDER BY capacity_liters DESC;
     """
-    reactors = await execute_query(sql, params)
+    reactors = await execute_query_tenant(sql, params, tenant_id=tenant_id)
 
     if not reactors:
         return {"error": "No hay reactores activos configurados para este tenant."}
@@ -380,11 +397,19 @@ async def get_coverage_alert(
     umbral_alerta: int = 15,
     db: Any = None,
 ) -> dict[str, Any]:
-    sql = """
+    schema = get_schema(tenant_id)
+    pg = is_postgres(tenant_id)
+    cat_col  = "NULL AS category_name," if pg else "cat.category_name,"
+    cat_join = "" if pg else f"""LEFT JOIN gold.dim_category cat
+            ON  cat.tenant_id   = ppw.tenant_id
+            AND cat.category_id = sk.category_id"""
+    iso_week = current_iso_week_expr(tenant_id)
+
+    sql = f"""
         SELECT
             ppw.sku_code,
             sk.sku_name,
-            cat.category_name,
+            {cat_col}
             ppw.iso_year_week,
             ppw.predicted_units_week,
             ppw.stock_current,
@@ -394,30 +419,25 @@ async def get_coverage_alert(
             ppw.is_critical,
             ppw.has_component_shortage,
             ppw.blocking_components
-        FROM gold.fact_production_plan_weekly ppw
-        JOIN gold.dim_sku sk
+        FROM {schema}.fact_production_plan_weekly ppw
+        JOIN {schema}.dim_sku sk
             ON  sk.tenant_id   = ppw.tenant_id
             AND sk.sku_code    = ppw.sku_code
             AND sk.family_code = '1.1'
-            AND sk.is_finished = 1
-        LEFT JOIN gold.dim_category cat
-            ON  cat.tenant_id = ppw.tenant_id
-            AND cat.category_id = sk.category_id
+            AND sk.is_finished = {'TRUE' if pg else '1'}
+        {cat_join}
         WHERE ppw.tenant_id    = ?
           AND ppw.iso_year_week = (
-              -- Primera semana disponible en el plan (>= semana actual)
+              -- Primera semana disponible (>= semana actual)
               SELECT MIN(p2.iso_year_week)
-              FROM gold.fact_production_plan_weekly p2
+              FROM {schema}.fact_production_plan_weekly p2
               WHERE p2.tenant_id    = ?
-                AND p2.iso_year_week >= (
-                    SELECT iso_year_week FROM gold.dim_date
-                    WHERE date = CAST(GETDATE() AS DATE)
-                )
+                AND p2.iso_year_week >= {iso_week}
           )
         ORDER BY ppw.days_of_coverage ASC,
                  ppw.units_to_produce DESC;
     """
-    rows = await execute_query(sql, (tenant_id, tenant_id))
+    rows = await execute_query_tenant(sql, (tenant_id, tenant_id), tenant_id=tenant_id)
 
     criticos, alertas, normales = [], [], []
     for r in rows:
@@ -475,6 +495,35 @@ async def get_component_stock(
         where_extra = ""
         extra_params = ()
 
+    schema = get_schema(tenant_id)
+    pg = is_postgres(tenant_id)
+    today = current_date_expr(tenant_id)
+
+    if pg:
+        lateral_join = f"""LEFT JOIN LATERAL (
+            SELECT STRING_AGG(
+                TO_CHAR(po2.order_date, 'YYYY-MM-DD') || ': ' ||
+                CAST(po2.units_pending AS VARCHAR(20)) || ' u',
+                ' | '
+            ) AS proximas_llegadas
+            FROM {schema}.fact_purchase_orders po2
+            WHERE po2.tenant_id     = cs.tenant_id
+              AND po2.component_sku = cs.component_sku
+              AND po2.status        = 'Pendiente'
+        ) po ON TRUE"""
+    else:
+        lateral_join = f"""OUTER APPLY (
+            SELECT STRING_AGG(
+                CONVERT(NVARCHAR(10), po2.order_date) + ': ' +
+                CAST(po2.units_pending AS NVARCHAR(20)) + ' u',
+                ' | '
+            ) AS proximas_llegadas
+            FROM {schema}.fact_purchase_orders po2
+            WHERE po2.tenant_id     = cs.tenant_id
+              AND po2.component_sku = cs.component_sku
+              AND po2.status        = 'Pendiente'
+        ) po"""
+
     sql = f"""
         SELECT
             cs.component_sku,
@@ -489,20 +538,10 @@ async def get_component_stock(
             cs.stock_min,
             cs.snapshot_date,
             po.proximas_llegadas
-        FROM gold.fact_component_stock cs
-        OUTER APPLY (
-            SELECT STRING_AGG(
-                CONVERT(NVARCHAR(10), po2.order_date) + ': ' +
-                CAST(po2.units_pending AS NVARCHAR(20)) + ' u',
-                ' | '
-            ) AS proximas_llegadas
-            FROM gold.fact_purchase_orders po2
-            WHERE po2.tenant_id     = cs.tenant_id
-              AND po2.component_sku = cs.component_sku
-              AND po2.status        = 'Pendiente'
-        ) po
+        FROM {schema}.fact_component_stock cs
+        {lateral_join}
         WHERE cs.tenant_id     = ?
-          AND cs.snapshot_date = CAST(GETDATE() AS DATE)
+          AND cs.snapshot_date = {today}
           {where_extra}
         ORDER BY cs.is_critical DESC,
                  cs.is_low     DESC,
@@ -510,7 +549,7 @@ async def get_component_stock(
                  cs.component_sku;
     """
     params = (tenant_id,) + extra_params
-    rows = await execute_query(sql, params)
+    rows = await execute_query_tenant(sql, params, tenant_id=tenant_id)
 
     return {
         "tipo_filtro": tipo_norm,
@@ -528,6 +567,10 @@ async def get_production_history(
     sku_code: str | None = None,
     db: Any = None,
 ) -> dict[str, Any]:
+    schema = get_schema(tenant_id)
+    pg = is_postgres(tenant_id)
+    today = current_date_expr(tenant_id)
+    weeks_expr = weeks_ago_expr(tenant_id)
     sku_filter = "AND po.sku_code = ?" if sku_code else ""
     sku_params = (sku_code,) if sku_code else ()
 
@@ -540,42 +583,40 @@ async def get_production_history(
             SUM(po.liters_produced)  AS liters_produced,
             COUNT(*)                 AS lotes,
             MAX(po.operator)         AS operador
-        FROM gold.fact_production_orders po
-        JOIN gold.dim_sku sk
+        FROM {schema}.fact_production_orders po
+        JOIN {schema}.dim_sku sk
             ON  sk.tenant_id   = po.tenant_id
             AND sk.sku_code    = po.sku_code
             AND sk.family_code = '1.1'
         WHERE po.tenant_id       = ?
-          AND po.production_date >= DATEADD(WEEK, -?, CAST(GETDATE() AS DATE))
+          AND po.production_date >= {weeks_expr}
           {sku_filter}
         GROUP BY po.iso_year_week, po.sku_code, sk.sku_name
         ORDER BY po.iso_year_week DESC, po.sku_code;
     """
-    prod_rows = await execute_query(
-        sql_prod, (tenant_id, semanas) + sku_params
+    prod_rows = await execute_query_tenant(
+        sql_prod, (tenant_id, semanas) + sku_params, tenant_id=tenant_id
     )
 
-    # Predicciones del mismo período para comparar
     sql_fc = f"""
         SELECT
             iso_year_week,
             sku_code,
             SUM(predicted_units) AS predicted_units
-        FROM gold.fact_demand_forecast
+        FROM {schema}.fact_demand_forecast
         WHERE tenant_id    = ?
-          AND is_active     = 1
-          AND forecast_date >= DATEADD(WEEK, -?, CAST(GETDATE() AS DATE))
-          AND forecast_date <  CAST(GETDATE() AS DATE)
+          AND is_active     = {'TRUE' if pg else '1'}
+          AND forecast_date >= {weeks_expr}
+          AND forecast_date <  {today}
           {sku_filter}
         GROUP BY iso_year_week, sku_code
         ORDER BY iso_year_week DESC, sku_code;
     """
-    fc_rows = await execute_query(
-        sql_fc, (tenant_id, semanas) + sku_params
+    fc_rows = await execute_query_tenant(
+        sql_fc, (tenant_id, semanas) + sku_params, tenant_id=tenant_id
     )
 
-    # Órdenes de compra del período
-    sql_oc = """
+    sql_oc = f"""
         SELECT
             component_sku,
             component_name,
@@ -583,13 +624,13 @@ async def get_production_history(
             SUM(units_pending)  AS units_pending,
             COUNT(*)            AS nro_ordenes,
             SUM(total_cost)     AS total_cost
-        FROM gold.fact_purchase_orders
+        FROM {schema}.fact_purchase_orders
         WHERE tenant_id   = ?
-          AND order_date  >= DATEADD(WEEK, -?, CAST(GETDATE() AS DATE))
+          AND order_date  >= {weeks_ago_expr(tenant_id)}
         GROUP BY component_sku, component_name
         ORDER BY total_cost DESC;
     """
-    oc_rows = await execute_query(sql_oc, (tenant_id, semanas))
+    oc_rows = await execute_query_tenant(sql_oc, (tenant_id, semanas), tenant_id=tenant_id)
 
     # Comparación real vs. predicho
     fc_map = {(r["iso_year_week"], r["sku_code"]): r["predicted_units"] for r in fc_rows}
