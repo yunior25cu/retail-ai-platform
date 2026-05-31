@@ -175,7 +175,7 @@ async def get_production_forecast(
             AND sk.is_finished = 1
         LEFT JOIN gold.dim_category cat
             ON  cat.tenant_id = ppw.tenant_id
-            AND cat.id        = sk.category_id
+            AND cat.category_id = sk.category_id
         WHERE ppw.tenant_id   = ?
           AND ppw.iso_year_week >= (
               SELECT iso_year_week FROM gold.dim_date
@@ -402,16 +402,22 @@ async def get_coverage_alert(
             AND sk.is_finished = 1
         LEFT JOIN gold.dim_category cat
             ON  cat.tenant_id = ppw.tenant_id
-            AND cat.id        = sk.category_id
+            AND cat.category_id = sk.category_id
         WHERE ppw.tenant_id    = ?
           AND ppw.iso_year_week = (
-              SELECT iso_year_week FROM gold.dim_date
-              WHERE date = CAST(GETDATE() AS DATE)
+              -- Primera semana disponible en el plan (>= semana actual)
+              SELECT MIN(p2.iso_year_week)
+              FROM gold.fact_production_plan_weekly p2
+              WHERE p2.tenant_id    = ?
+                AND p2.iso_year_week >= (
+                    SELECT iso_year_week FROM gold.dim_date
+                    WHERE date = CAST(GETDATE() AS DATE)
+                )
           )
         ORDER BY ppw.days_of_coverage ASC,
                  ppw.units_to_produce DESC;
     """
-    rows = await execute_query(sql, (tenant_id,))
+    rows = await execute_query(sql, (tenant_id, tenant_id))
 
     criticos, alertas, normales = [], [], []
     for r in rows:
