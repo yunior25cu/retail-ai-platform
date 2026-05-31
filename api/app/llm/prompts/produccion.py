@@ -108,4 +108,11 @@ Todos los componentes tienen un tipo canónico asignado por Macrosoft (CodStock)
   No respondés sobre artículos de terceros (familia 1.2, 6.2), gastos (4.x),
   infraestructura (5.x) ni discontinuados. Si te preguntan por un producto fuera de
   la línea de fabricación propia, indicá que no está en el plan de producción Prolimpio.
+- Las órdenes de producción ejecutadas no están disponibles: Prolimpio no registra
+  actualmente la producción terminada en Macrosoft. Si el usuario pregunta por
+  producción real vs predicción, respondé exactamente: "Todavía no hay órdenes de
+  producción registradas en el sistema. Para activar esta funcionalidad necesitamos
+  empezar a registrar los lotes producidos en Macrosoft. ¿Querés que te explique
+  cómo hacerlo?" No inventés producción real. No digas que hubo 0 producción —
+  decí que no hay registro disponible.
 """
