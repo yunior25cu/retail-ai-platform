@@ -25,6 +25,7 @@ from app.db.connections import (
     current_iso_week_expr,
     weeks_ago_expr,
 )
+from app.tools.production_cache import cache_get, cache_set, _record_hit
 
 # ── Constantes de herramienta ─────────────────────────────────────────────────
 
@@ -152,6 +153,12 @@ async def get_production_forecast(
     familia: str | None = None,
     db: Any = None,
 ) -> dict[str, Any]:
+    cache_key = f"{tenant_id}:forecast:{semanas}:{solo_criticos}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        _record_hit("get_production_forecast")
+        return {**cached, "cache_hit": True}
+
     schema = get_schema(tenant_id)
     pg = is_postgres(tenant_id)
     # Max 15 rows by default; 30 hard cap regardless of semanas
@@ -193,7 +200,9 @@ async def get_production_forecast(
         {limit_clause};
     """
     rows = await execute_query_tenant(sql, tuple(params_list), tenant_id=tenant_id)
-    return {"plan": rows}
+    result = {"plan": rows, "cache_hit": False}
+    cache_set(cache_key, {"plan": rows})
+    return result
 
 
 async def get_component_requirements(
@@ -305,21 +314,28 @@ async def get_reactor_schedule(
     if tipo_reactor not in VALID_TYPES:
         tipo_reactor = "ambos"
 
+    # Cache reactor list only (30-min TTL) — schedule calc is per-request
+    reactor_cache_key = f"{tenant_id}:reactors"
+
     type_filter = "" if tipo_reactor == "ambos" else "AND reactor_type = ?"
     params: tuple[Any, ...] = (tenant_id,)
     if tipo_reactor != "ambos":
         params = (tenant_id, tipo_reactor)
 
-    schema = get_schema(tenant_id)
-    sql = f"""
-        SELECT reactor_code, reactor_name, capacity_liters, reactor_type
-        FROM {schema}.dim_reactor
-        WHERE tenant_id = ?
-          AND is_active  = 1
-          {type_filter}
-        ORDER BY capacity_liters DESC;
-    """
-    reactors = await execute_query_tenant(sql, params, tenant_id=tenant_id)
+    # Try reactor list from cache (30-min TTL)
+    reactors = cache_get(reactor_cache_key)
+    if reactors is None:
+        schema = get_schema(tenant_id)
+        sql = f"""
+            SELECT reactor_code, reactor_name, capacity_liters, reactor_type
+            FROM {schema}.dim_reactor
+            WHERE tenant_id = ?
+              AND is_active  = 1
+              {type_filter}
+            ORDER BY capacity_liters DESC;
+        """
+        reactors = await execute_query_tenant(sql, params, tenant_id=tenant_id)
+        cache_set(reactor_cache_key, reactors)
 
     if not reactors:
         return {"error": "No hay reactores activos configurados para este tenant."}
@@ -388,6 +404,13 @@ async def get_coverage_alert(
     umbral_alerta: int = 15,
     db: Any = None,
 ) -> dict[str, Any]:
+    from datetime import date as _date
+    cache_key = f"{tenant_id}:coverage:{_date.today()}:{umbral_critico}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        _record_hit("get_coverage_alert")
+        return {**cached, "cache_hit": True}
+
     schema = get_schema(tenant_id)
     pg = is_postgres(tenant_id)
     iso_week = current_iso_week_expr(tenant_id)
@@ -434,7 +457,7 @@ async def get_coverage_alert(
         else:
             normales.append(r)
 
-    return {
+    result = {
         "umbral_critico_dias": umbral_critico,
         "umbral_alerta_dias": umbral_alerta,
         "critico": criticos,
@@ -448,7 +471,10 @@ async def get_coverage_alert(
                 1 for r in rows if r.get("has_component_shortage")
             ),
         },
+        "cache_hit": False,
     }
+    cache_set(cache_key, {k: v for k, v in result.items() if k != "cache_hit"})
+    return result
 
 
 async def get_component_stock(
@@ -457,6 +483,14 @@ async def get_component_stock(
     tipo: str = "todos",
     db: Any = None,
 ) -> dict[str, Any]:
+    from datetime import date as _date
+    tipo_key = tipo if tipo in ("quimico","envase","etiqueta","fragancia","granel","criticos","todos") else "todos"
+    cache_key = f"{tenant_id}:stock:{_date.today()}:{tipo_key}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        _record_hit("get_component_stock")
+        return {**cached, "cache_hit": True}
+
     TIPO_MAP = {
         "quimico":        ("quimico",),
         "envase":        ("envase",),
@@ -514,13 +548,16 @@ async def get_component_stock(
     params = (tenant_id,) + extra_params
     rows = await execute_query_tenant(sql, params, tenant_id=tenant_id)
 
-    return {
+    result = {
         "tipo_filtro": tipo_norm,
         "total": len(rows),
         "criticos": sum(1 for r in rows if r.get("is_critical")),
         "bajos":    sum(1 for r in rows if r.get("is_low")),
         "componentes": rows,
+        "cache_hit": False,
     }
+    cache_set(cache_key, {k: v for k, v in result.items() if k != "cache_hit"})
+    return result
 
 
 async def get_production_history(

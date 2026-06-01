@@ -66,6 +66,7 @@ def log_token_breakdown(
     total_output_tokens: int,
     tools_invoked: list[str],
     response_text: str,
+    tool_cache_hits: list[str] | None = None,
 ) -> None:
     """Log a per-component token breakdown. Auto-stops after TOKEN_LOG_LIMIT."""
     global _log_count
@@ -92,6 +93,7 @@ def log_token_breakdown(
         total_output_tokens * _COST_OUTPUT_PER_TOKEN
     )
 
+    cache_hits = tool_cache_hits or []
     log.info(
         "token_breakdown",
         log_n=f"{_log_count}/{TOKEN_LOG_LIMIT}",
@@ -104,6 +106,8 @@ def log_token_breakdown(
         response_tokens=resp_tokens,
         tool_calls=tools_invoked,
         tool_call_count=len(tools_invoked),
+        cache_hits=cache_hits,
+        cache_hit_count=len(cache_hits),
         total_input=total_input_tokens,
         total_output=total_output_tokens,
         estimated_cost_usd=round(cost_usd, 6),

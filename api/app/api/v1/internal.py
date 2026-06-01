@@ -151,6 +151,10 @@ async def internal_chat(
             detail={"scope": e.scope, "message": e.detail},
         ) from e
 
+    # Reset per-request cache hit tracker
+    from app.tools.production_cache import request_cache_hits_reset
+    request_cache_hits_reset()
+
     system_prompt = select_prompt(auth.role, vertical=cfg.vertical)
 
     # Conversation: X-Conversation-Id header takes priority over body field
@@ -174,6 +178,7 @@ async def internal_chat(
         )
         # ── Token breakdown logging (tenant 24, first 20 queries) ──────────
         from app.llm.token_logger import log_token_breakdown
+        from app.tools.production_cache import request_cache_hits_get
         log_token_breakdown(
             tenant_id=auth.tenant_id,
             query=payload.message,
@@ -183,6 +188,7 @@ async def internal_chat(
             total_output_tokens=result.tokens_output,
             tools_invoked=[t.name for t in result.tools_invoked],
             response_text=result.response_text,
+            tool_cache_hits=request_cache_hits_get(),
         )
     except RuntimeError as e:
         duration = int((time.perf_counter() - t0) * 1000)
