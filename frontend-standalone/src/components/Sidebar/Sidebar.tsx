@@ -84,8 +84,8 @@ export function Sidebar({ conversationId, onSelectConversation, onNewConversatio
   useEffect(() => { loadConversations(); }, [loadConversations]);
 
   const groups = groupByDate(conversations);
-  const canConfig = user && ["super_admin", "direccion"].includes(user.role);
-  const canAdmin  = user?.role === "super_admin";
+  const canConfig = user && ["super_admin", "superadmin", "admin_tenant", "direccion"].includes(user.role);
+  const canAdmin  = user && ["super_admin", "superadmin"].includes(user.role);
 
   return (
     <Box sx={sx.root}>

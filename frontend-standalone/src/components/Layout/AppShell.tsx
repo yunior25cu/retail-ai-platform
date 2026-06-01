@@ -5,15 +5,15 @@ import { tokens } from "@/theme/tokens";
 import { Sidebar } from "@/components/Sidebar/Sidebar";
 
 interface Props {
-  conversationId: string | null;
-  onSelectConversation: (id: string) => void;
-  onNewConversation: () => void;
+  conversationId?: string | null;
+  onSelectConversation?: (id: string) => void;
+  onNewConversation?: () => void;
   children: React.ReactNode;
 }
 
 const SIDEBAR_W = tokens.sidebar.width;
 
-export function AppShell({ conversationId, onSelectConversation, onNewConversation, children }: Props) {
+export function AppShell({ conversationId = null, onSelectConversation = () => {}, onNewConversation = () => {}, children }: Props) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down("md"));
   const [mobileOpen, setMobileOpen] = useState(false);

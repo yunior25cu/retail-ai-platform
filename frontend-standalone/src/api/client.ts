@@ -260,11 +260,11 @@ export const api = {
       .then((r) => r.data),
 
   // Config
-  getTenantConfig: () =>
-    http.get<TenantConfigResponse>("/api/v1/config/tenant").then((r) => r.data),
+  getTenantConfig: (queryStr = "") =>
+    http.get<TenantConfigResponse>(`/api/v1/config/tenant${queryStr}`).then((r) => r.data),
 
-  patchTenantConfig: (patch: TenantConfigPatch) =>
-    http.patch<TenantConfigResponse>("/api/v1/config/tenant", patch).then((r) => r.data),
+  patchTenantConfig: (patch: TenantConfigPatch, queryStr = "") =>
+    http.patch<TenantConfigResponse>(`/api/v1/config/tenant${queryStr}`, patch).then((r) => r.data),
 
   // Admin
   adminGetTenants: () =>

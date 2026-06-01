@@ -139,6 +139,21 @@ async def _execute_pg(sql: str, params: tuple | None) -> list[dict[str, Any]]:
     return await asyncio.to_thread(_execute_pg_sync, sql, params)
 
 
+def _execute_pg_write_sync(sql: str, params: tuple | None) -> None:
+    conn = psycopg2.connect(**_PG_CONN_PARAMS)
+    try:
+        cur = conn.cursor()
+        cur.execute(_convert_placeholders(sql), params or ())
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _execute_pg_write(sql: str, params: tuple | None = None) -> None:
+    """Execute a write (INSERT/UPDATE/DELETE) on PostgreSQL with commit."""
+    await asyncio.to_thread(_execute_pg_write_sync, sql, params)
+
+
 # ── Public routing function ───────────────────────────────────────────────────
 
 async def execute_query_tenant(

@@ -5,7 +5,7 @@ import {
   MenuItem, Select, Snackbar, Stack, Switch, TextField, Typography,
 } from "@mui/material";
 import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
-import { api, type TenantConfigResponse, type TenantConfigPatch } from "@/api/client";
+import { api, type TenantConfigResponse, type TenantConfigPatch, type AdminTenant } from "@/api/client";
 import { useAuth } from "@/hooks/useAuth";
 import { tokens } from "@/theme/tokens";
 
@@ -55,22 +55,45 @@ function configToDraft(cfg: TenantConfigResponse): Draft {
   };
 }
 
+const SUPERADMIN_ROLES = ["superadmin", "super_admin"];
+
 export function ConfiguracionPage() {
   const { user } = useAuth();
+  const isSuperadmin = SUPERADMIN_ROLES.includes(user?.role ?? "");
+
+  // Superadmin needs to select a tenant first (their own tenant_id is 0)
+  const [tenants, setTenants] = useState<AdminTenant[]>([]);
+  const [selectedTenantId, setSelectedTenantId] = useState<number | "">(
+    isSuperadmin ? "" : (user?.tenant_id ?? "")
+  );
+
   const [cfg, setCfg] = useState<TenantConfigResponse | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!isSuperadmin);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Load tenant list for superadmin selector
+  useEffect(() => {
+    if (isSuperadmin) {
+      api.adminGetTenants()
+        .then((list) => setTenants(list.filter((t) => t.is_active)))
+        .catch(() => null);
+    }
+  }, [isSuperadmin]);
+
+  const effectiveTenantId = isSuperadmin ? selectedTenantId : (user?.tenant_id ?? null);
+
   const load = useCallback(() => {
+    if (!effectiveTenantId) return;
     setLoading(true);
-    api.getTenantConfig()
+    const params = isSuperadmin ? `?tenant_id=${effectiveTenantId}` : "";
+    api.getTenantConfig(params)
       .then((c) => { setCfg(c); setDraft(configToDraft(c)); })
       .catch(() => setError("No se pudo cargar la configuración."))
       .finally(() => setLoading(false));
-  }, []);
+  }, [effectiveTenantId, isSuperadmin]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -91,7 +114,8 @@ export function ConfiguracionPage() {
           Object.entries(draft.rate_limits).map(([k, v]) => [`rate_limit_${k}`, v])
         ),
       };
-      const updated = await api.patchTenantConfig(patch);
+      const params = isSuperadmin && effectiveTenantId ? `?tenant_id=${effectiveTenantId}` : "";
+      const updated = await api.patchTenantConfig(patch, params);
       setCfg(updated);
       setDraft(configToDraft(updated));
       setToast("Configuración guardada.");
@@ -101,6 +125,32 @@ export function ConfiguracionPage() {
       setSaving(false);
     }
   };
+
+  // Superadmin without a tenant selected — show picker
+  if (isSuperadmin && !effectiveTenantId) {
+    return (
+      <Box sx={{ maxWidth: 480, mx: "auto", px: 3, py: 8 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 4 }}>
+          <SettingsOutlinedIcon sx={{ color: tokens.brand.primary, fontSize: 28 }} />
+          <Typography variant="h5" fontWeight={700}>Configuración de tenant</Typography>
+        </Box>
+        <FormControl fullWidth size="small">
+          <InputLabel>Seleccionar tenant</InputLabel>
+          <Select
+            label="Seleccionar tenant"
+            value={selectedTenantId}
+            onChange={(e) => setSelectedTenantId(Number(e.target.value))}
+          >
+            {tenants.map((t) => (
+              <MenuItem key={t.id} value={t.platform_tenant_id ?? t.id}>
+                {t.name} ({t.slug}) — {t.vertical}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      </Box>
+    );
+  }
 
   if (loading) return <Box sx={{ display: "flex", justifyContent: "center", pt: 8 }}><CircularProgress /></Box>;
 

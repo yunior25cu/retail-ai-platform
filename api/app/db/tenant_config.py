@@ -1,8 +1,11 @@
 """Per-tenant configuration for the AI Assistant.
 
-Reads + writes ``api_audit.ai_tenant_config`` (a key/value table) and
-exposes it as a typed ``TenantConfig`` dataclass. Missing keys fall back
-to the dataclass defaults so a brand-new tenant always works.
+Reads + writes:
+  - SQL Server tenants: ``api_audit.ai_tenant_config``
+  - PostgreSQL tenants:  ``config.tenant_config``
+
+Routing is determined by ``connections.is_postgres(tenant_id)``.
+Missing keys fall back to TenantConfig defaults so a brand-new tenant always works.
 
 In-memory cache: 5 minutes per tenant. Single-process semantics — if you
 run multiple uvicorn workers, an update made in worker A is invisible
@@ -28,6 +31,7 @@ _VALID_KEYS = frozenset(
         "rate_limit_tienda",
         "rate_limit_producto",
         "rate_limit_produccion",
+        "rate_limit_compras",
         "suggestions_enabled",
         "vertical",             # 'retail' | 'produccion' | extensible
     }
@@ -50,18 +54,20 @@ class TenantConfig:
     rate_limit_tienda: int = 15
     rate_limit_producto: int = 15
     rate_limit_produccion: int = 30
+    rate_limit_compras: int = 30
     suggestions_enabled: bool = True
     vertical: str = "retail"          # 'retail' | 'produccion' | extensible
 
     def rate_limit_for_role(self, role: str) -> int:
-        """Returns the per-hour cap for a Python role string."""
+        """Returns the per-hour cap for a given role string."""
         mapping = {
-            "direccion": self.rate_limit_director,
-            "marca": self.rate_limit_marca,
-            "tienda": self.rate_limit_tienda,
-            "sku": self.rate_limit_producto,
-            "producto": self.rate_limit_producto,
-            "produccion": self.rate_limit_produccion,
+            "direccion":   self.rate_limit_director,
+            "marca":       self.rate_limit_marca,
+            "tienda":      self.rate_limit_tienda,
+            "sku":         self.rate_limit_producto,
+            "producto":    self.rate_limit_producto,
+            "produccion":  self.rate_limit_produccion,
+            "compras":     self.rate_limit_compras,
         }
         return mapping.get(role, self.rate_limit_producto)
 
@@ -91,6 +97,8 @@ def _apply_row(cfg: TenantConfig, key: str, value: str) -> None:
             cfg.rate_limit_producto = int(value)
         elif key == "rate_limit_produccion":
             cfg.rate_limit_produccion = int(value)
+        elif key == "rate_limit_compras":
+            cfg.rate_limit_compras = int(value)
         elif key == "vertical":
             cfg.vertical = value.lower().strip()
         elif key == "suggestions_enabled":
@@ -107,14 +115,22 @@ async def get_tenant_config(tenant_id: int) -> TenantConfig:
     if cached and (now - cached[0]) < _CACHE_TTL_SECONDS:
         return cached[1]
 
-    rows = await execute_query(
-        """
-        SELECT config_key, config_value
-        FROM api_audit.ai_tenant_config
-        WHERE tenant_id = ?;
-        """,
-        (tenant_id,),
-    )
+    from app.db.connections import is_postgres, _execute_pg
+
+    if is_postgres(tenant_id):
+        rows = await _execute_pg(
+            "SELECT config_key, config_value FROM config.tenant_config WHERE tenant_id = ?",
+            (tenant_id,),
+        )
+    else:
+        rows = await execute_query(
+            """
+            SELECT config_key, config_value
+            FROM api_audit.ai_tenant_config
+            WHERE tenant_id = ?;
+            """,
+            (tenant_id,),
+        )
 
     cfg = TenantConfig()
     for row in rows:
@@ -133,26 +149,41 @@ async def update_tenant_config(
     if key not in _VALID_KEYS:
         raise ValueError(f"unknown config_key: {key!r}")
 
-    await execute_query(
-        """
-        MERGE api_audit.ai_tenant_config AS target
-        USING (SELECT ? AS tenant_id, ? AS config_key) AS source
-            ON target.tenant_id = source.tenant_id
-           AND target.config_key = source.config_key
-        WHEN MATCHED THEN
-            UPDATE SET config_value = ?,
-                       updated_at  = SYSUTCDATETIME(),
-                       updated_by  = ?
-        WHEN NOT MATCHED THEN
-            INSERT (tenant_id, config_key, config_value, updated_by)
-            VALUES (?, ?, ?, ?);
-        """,
-        (
-            tenant_id, key,
-            value, updated_by,
-            tenant_id, key, value, updated_by,
-        ),
-    )
+    from app.db.connections import is_postgres, _execute_pg_write
+
+    if is_postgres(tenant_id):
+        await _execute_pg_write(
+            """
+            INSERT INTO config.tenant_config (tenant_id, config_key, config_value)
+            VALUES (?, ?, ?)
+            ON CONFLICT (tenant_id, config_key)
+            DO UPDATE SET config_value = EXCLUDED.config_value,
+                          updated_at   = NOW()
+            """,
+            (tenant_id, key, value),
+        )
+    else:
+        await execute_query(
+            """
+            MERGE api_audit.ai_tenant_config AS target
+            USING (SELECT ? AS tenant_id, ? AS config_key) AS source
+                ON target.tenant_id = source.tenant_id
+               AND target.config_key = source.config_key
+            WHEN MATCHED THEN
+                UPDATE SET config_value = ?,
+                           updated_at  = SYSUTCDATETIME(),
+                           updated_by  = ?
+            WHEN NOT MATCHED THEN
+                INSERT (tenant_id, config_key, config_value, updated_by)
+                VALUES (?, ?, ?, ?);
+            """,
+            (
+                tenant_id, key,
+                value, updated_by,
+                tenant_id, key, value, updated_by,
+            ),
+        )
+
     _cache.pop(tenant_id, None)
 
 
@@ -165,21 +196,37 @@ def invalidate_cache(tenant_id: int | None = None) -> None:
 
 
 async def get_monthly_spend_usd(tenant_id: int) -> float:
-    """Sum of cost_usd over the current UTC month for successful audit
-    rows. Used by the /chat budget gate and surfaced in the config GET
-    response."""
-    rows = await execute_query(
-        """
-        SELECT ISNULL(SUM(CAST(cost_usd AS FLOAT)), 0) AS total
-        FROM api_audit.ai_audit_log
-        WHERE tenant_id = ?
-          AND timestamp_utc >= DATEFROMPARTS(
-                  YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1)
-          AND timestamp_utc <  DATEADD(MONTH, 1,
-                  DATEFROMPARTS(
-                      YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1))
-          AND status = 'SUCCESS';
-        """,
-        (tenant_id,),
-    )
+    """Sum of cost_usd over the current UTC month.
+
+    - PG tenants (e.g. tenant 24): reads ``audit.conversation_log.estimated_cost_usd``
+    - SS tenants: reads ``api_audit.ai_audit_log.cost_usd``
+    """
+    from app.db.connections import is_postgres, _execute_pg
+
+    if is_postgres(tenant_id):
+        rows = await _execute_pg(
+            """
+            SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total
+            FROM audit.conversation_log
+            WHERE tenant_id = ?
+              AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
+            """,
+            (tenant_id,),
+        )
+    else:
+        rows = await execute_query(
+            """
+            SELECT ISNULL(SUM(CAST(cost_usd AS FLOAT)), 0) AS total
+            FROM api_audit.ai_audit_log
+            WHERE tenant_id = ?
+              AND timestamp_utc >= DATEFROMPARTS(
+                      YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1)
+              AND timestamp_utc <  DATEADD(MONTH, 1,
+                      DATEFROMPARTS(
+                          YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1))
+              AND status = 'SUCCESS';
+            """,
+            (tenant_id,),
+        )
+
     return float(rows[0]["total"]) if rows else 0.0

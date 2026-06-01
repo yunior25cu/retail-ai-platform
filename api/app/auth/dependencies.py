@@ -34,7 +34,7 @@ class AuthContext:
     role: str  # 'direccion' / 'marca' / 'tienda' / 'sku' / 'produccion'
 
 
-VALID_ROLES = {"direccion", "marca", "tienda", "sku", "produccion"}
+VALID_ROLES = {"direccion", "marca", "tienda", "sku", "produccion", "superadmin", "admin_tenant"}
 
 
 async def get_auth_context(

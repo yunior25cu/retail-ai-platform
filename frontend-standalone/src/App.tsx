@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { CssBaseline, ThemeProvider, createTheme } from "@mui/material";
 import { AuthProvider } from "@/store/auth.tsx";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
+import { AppShell } from "@/components/Layout/AppShell";
 import { Login } from "@/pages/Login";
 import { Chat } from "@/pages/Chat";
 import { NotFound } from "@/pages/NotFound";
@@ -46,16 +47,20 @@ export default function App() {
             <Route
               path="/configuracion"
               element={
-                <ProtectedRoute requiredRoles={["super_admin", "direccion"]}>
-                  <ConfiguracionPage />
+                <ProtectedRoute requiredRoles={["super_admin", "superadmin", "admin_tenant", "direccion"]}>
+                  <AppShell>
+                    <ConfiguracionPage />
+                  </AppShell>
                 </ProtectedRoute>
               }
             />
             <Route
               path="/admin"
               element={
-                <ProtectedRoute requiredRoles={["super_admin"]}>
-                  <AdminPage />
+                <ProtectedRoute requiredRoles={["super_admin", "superadmin"]}>
+                  <AppShell>
+                    <AdminPage />
+                  </AppShell>
                 </ProtectedRoute>
               }
             />
