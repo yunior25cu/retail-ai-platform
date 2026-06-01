@@ -10,6 +10,7 @@ import { ChatMessage } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { ContextBar } from "./ContextBar";
 import { AiPinnedList } from "./AiPinnedList";
+import { AiMetricsPanel } from "./AiMetricsPanel";
 import { api } from "@/api/client";
 import { getPins, togglePin, unpinMessage } from "@/utils/pins";
 import type { PinnedMessage } from "@/utils/pins";
@@ -53,7 +54,8 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
     suggestions, sendMessage, loadConversation,
   } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [activeTab, setActiveTab] = useState<"chat" | "pins">("chat");
+  const canSeeMetrics = user?.role === "direccion";
+  const [activeTab, setActiveTab] = useState<"chat" | "pins" | "metrics">("chat");
   const [pins, setPins] = useState<PinnedMessage[]>([]);
 
   // Load pins from localStorage on mount and when tenant changes
@@ -123,14 +125,15 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
       <Box sx={{ borderBottom: "1px solid", borderColor: "grey.200", px: 2, display: "flex", alignItems: "center" }}>
         <Tabs
           value={activeTab}
-          onChange={(_, v: "chat" | "pins") => setActiveTab(v)}
+          onChange={(_, v: "chat" | "pins" | "metrics") => setActiveTab(v)}
           sx={{
             flex: 1, minHeight: 36,
             "& .MuiTab-root": { minHeight: 36, fontSize: "0.8rem", py: 0, textTransform: "none" },
           }}
         >
-          <Tab value="chat" label="Chat" />
-          <Tab value="pins" label={pins.length > 0 ? `Anclados (${pins.length})` : "Anclados"} />
+          <Tab value="chat"    label="Chat" />
+          <Tab value="pins"    label={pins.length > 0 ? `Anclados (${pins.length})` : "Anclados"} />
+          {canSeeMetrics && <Tab value="metrics" label="Métricas" />}
         </Tabs>
         {messages.length > 0 && activeTab === "chat" && (
           <Tooltip title="Exportar conversación">
@@ -146,7 +149,11 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
       </Box>
 
       {/* Tab content */}
-      {activeTab === "pins" ? (
+      {activeTab === "metrics" ? (
+        <Box sx={{ flex: 1, overflow: "hidden" }}>
+          <AiMetricsPanel />
+        </Box>
+      ) : activeTab === "pins" ? (
         <Box sx={{ flex: 1, overflow: "hidden" }}>
           <AiPinnedList
             pins={pins}
