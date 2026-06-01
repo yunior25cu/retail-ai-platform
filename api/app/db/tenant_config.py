@@ -198,21 +198,25 @@ def invalidate_cache(tenant_id: int | None = None) -> None:
 async def get_monthly_spend_usd(tenant_id: int) -> float:
     """Sum of cost_usd over the current UTC month.
 
-    - PG tenants (e.g. tenant 24): reads ``audit.conversation_log.estimated_cost_usd``
-    - SS tenants: reads ``api_audit.ai_audit_log.cost_usd``
+    - PG tenants: audit.conversation_log has tokens_used but no cost column.
+      Estimated at $9 / 1M tokens (claude-sonnet-4 blended rate).
+    - SS tenants: reads api_audit.ai_audit_log.cost_usd (exact).
     """
     from app.db.connections import is_postgres, _execute_pg
 
     if is_postgres(tenant_id):
         rows = await _execute_pg(
             """
-            SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total
+            SELECT COALESCE(SUM(tokens_used), 0) AS total_tokens
             FROM audit.conversation_log
             WHERE tenant_id = ?
               AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
             """,
             (tenant_id,),
         )
+        total_tokens = int(rows[0]["total_tokens"]) if rows else 0
+        # $9 per 1M tokens — blended input/output estimate for claude-sonnet-4
+        return round(total_tokens * 9 / 1_000_000, 4)
     else:
         rows = await execute_query(
             """
