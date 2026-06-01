@@ -15,9 +15,17 @@ export function Login() {
   const { login } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [slug, setSlug] = useState("prolimpio");
+  const [slug, setSlug] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Auto-suggest slug when email ends in known domain
+  const handleEmailBlur = () => {
+    if (!slug && email.includes("@")) {
+      const isAdmin = email.toLowerCase().startsWith("admin@");
+      if (isAdmin) setSlug("admin");
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -68,6 +76,7 @@ export function Login() {
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            onBlur={handleEmailBlur}
             margin="normal"
             required
             autoFocus
