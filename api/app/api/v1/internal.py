@@ -303,7 +303,7 @@ async def _persist_failure_audit(
 # ---------------------------------------------------------------------------
 
 _SUGGESTIONS_CACHE: dict[str, tuple[float, list[str]]] = {}
-_SUGGESTIONS_TTL = 3600  # seconds
+_SUGGESTIONS_TTL = 86_400  # 24 hours — refreshes once/day per tenant+role+vertical
 
 # Per-role intent descriptions injected into the Claude prompt so the model
 # understands the user's scope, horizon, and what kinds of questions are
