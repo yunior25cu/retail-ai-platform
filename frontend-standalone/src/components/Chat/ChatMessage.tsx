@@ -1,17 +1,44 @@
-import { Box, Chip, Typography } from "@mui/material";
+import { useState } from "react";
+import { Box, Chip, IconButton, Tooltip, Typography } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import BuildOutlinedIcon from "@mui/icons-material/BuildOutlined";
+import ThumbUpOutlinedIcon from "@mui/icons-material/ThumbUpOutlined";
+import ThumbUpIcon from "@mui/icons-material/ThumbUp";
+import ThumbDownOutlinedIcon from "@mui/icons-material/ThumbDownOutlined";
+import ThumbDownIcon from "@mui/icons-material/ThumbDown";
+import PushPinOutlinedIcon from "@mui/icons-material/PushPinOutlined";
+import PushPinIcon from "@mui/icons-material/PushPin";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { tokens } from "@/theme/tokens";
 import type { ChatMessage as ChatMessageType } from "@/hooks/useChat";
+import { api } from "@/api/client";
+import { FeedbackPopover } from "./FeedbackPopover";
 
 interface Props {
   msg: ChatMessageType;
+  onTogglePin?: (msg: ChatMessageType) => void;
 }
 
-export function ChatMessage({ msg }: Props) {
+export function ChatMessage({ msg, onTogglePin }: Props) {
   const isUser = msg.role === "user";
+  const [feedbackSent, setFeedbackSent] = useState<"positive" | "negative" | null>(null);
+  const [popoverAnchor, setPopoverAnchor] = useState<HTMLElement | null>(null);
+
+  const handleThumbUp = async () => {
+    if (!msg.requestId || feedbackSent) return;
+    try { await api.submitFeedback({ request_id: msg.requestId, rating: "positive" }); }
+    catch { /* best-effort */ }
+    setFeedbackSent("positive");
+  };
+
+  const handleThumbDown = (e: React.MouseEvent<HTMLElement>) => {
+    if (!msg.requestId || feedbackSent) return;
+    setPopoverAnchor(e.currentTarget);
+  };
+
+  const canFeedback = !isUser && !!msg.requestId;
+
   return (
     <Box
       sx={{
@@ -91,13 +118,73 @@ export function ChatMessage({ msg }: Props) {
           </Box>
         )}
 
-        <Typography
-          variant="caption"
-          sx={{ display: "block", mt: 0.5, color: "text.disabled", textAlign: isUser ? "right" : "left" }}
-        >
-          {msg.timestamp.toLocaleTimeString("es-UY", { hour: "2-digit", minute: "2-digit" })}
-        </Typography>
+        {/* Footer row: timestamp + action buttons */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.25, mt: 0.5, justifyContent: isUser ? "flex-end" : "flex-start" }}>
+          <Typography
+            variant="caption"
+            sx={{ color: "text.disabled", mr: 0.5 }}
+          >
+            {msg.timestamp.toLocaleTimeString("es-UY", { hour: "2-digit", minute: "2-digit" })}
+          </Typography>
+
+          {/* Pin button — shown for all assistant messages when handler provided */}
+          {!isUser && onTogglePin && (
+            <Tooltip title={msg.isPinned ? "Desanclar" : "Anclar respuesta"}>
+              <IconButton size="small" onClick={() => onTogglePin(msg)} sx={{ p: 0.25, color: msg.isPinned ? tokens.brand.primary : "text.disabled" }}>
+                {msg.isPinned
+                  ? <PushPinIcon sx={{ fontSize: 14 }} />
+                  : <PushPinOutlinedIcon sx={{ fontSize: 14 }} />
+                }
+              </IconButton>
+            </Tooltip>
+          )}
+
+          {/* Feedback buttons — only for live messages (have requestId) */}
+          {canFeedback && (
+            <>
+              <Tooltip title={feedbackSent === "positive" ? "¡Gracias!" : "Buena respuesta"}>
+                <IconButton
+                  size="small"
+                  onClick={() => void handleThumbUp()}
+                  disabled={!!feedbackSent}
+                  sx={{ p: 0.25, color: feedbackSent === "positive" ? tokens.brand.primary : "text.disabled" }}
+                >
+                  {feedbackSent === "positive"
+                    ? <ThumbUpIcon sx={{ fontSize: 14 }} />
+                    : <ThumbUpOutlinedIcon sx={{ fontSize: 14 }} />
+                  }
+                </IconButton>
+              </Tooltip>
+              <Tooltip title={feedbackSent === "negative" ? "Gracias por el feedback" : "Mala respuesta"}>
+                <IconButton
+                  size="small"
+                  onClick={handleThumbDown}
+                  disabled={!!feedbackSent}
+                  sx={{ p: 0.25, color: feedbackSent === "negative" ? "error.main" : "text.disabled" }}
+                >
+                  {feedbackSent === "negative"
+                    ? <ThumbDownIcon sx={{ fontSize: 14 }} />
+                    : <ThumbDownOutlinedIcon sx={{ fontSize: 14 }} />
+                  }
+                </IconButton>
+              </Tooltip>
+            </>
+          )}
+        </Box>
       </Box>
+
+      {/* Negative feedback popover */}
+      {canFeedback && (
+        <FeedbackPopover
+          anchorEl={popoverAnchor}
+          requestId={msg.requestId!}
+          onClose={() => setPopoverAnchor(null)}
+          onSubmitted={() => {
+            setPopoverAnchor(null);
+            setFeedbackSent("negative");
+          }}
+        />
+      )}
     </Box>
   );
 }

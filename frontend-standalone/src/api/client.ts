@@ -174,6 +174,25 @@ export interface ConversationMessage {
   created_at: string;
 }
 
+export interface FeedbackPayload {
+  request_id: string;
+  rating: "positive" | "negative";
+  comment?: string;
+}
+
+export interface MetricsResponse {
+  period: string;
+  total_queries: number;
+  total_cost_usd: number;
+  active_users: number;
+  top_tool: string | null;
+  top_tool_count: number;
+  longest_conversation_turns: number;
+  avg_duration_ms: number;
+  queries_by_role: Record<string, number>;
+  queries_by_day: Array<{ date: string; count: number }>;
+}
+
 export interface TenantConfigResponse {
   monthly_budget_usd: number;
   budget_alert_pct: number;
@@ -258,6 +277,12 @@ export const api = {
     http
       .get<ConversationMessage[]>(`/api/v1/internal/conversations/${conversationId}/messages`)
       .then((r) => r.data),
+
+  submitFeedback: (payload: FeedbackPayload) =>
+    http.post<{ ok: boolean }>("/api/v1/internal/feedback", payload).then((r) => r.data),
+
+  getMetrics: () =>
+    http.get<MetricsResponse>("/api/v1/internal/metrics").then((r) => r.data),
 
   // Config
   getTenantConfig: (queryStr = "") =>

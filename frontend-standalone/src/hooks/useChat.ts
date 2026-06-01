@@ -15,6 +15,8 @@ export interface ChatMessage {
   timestamp: Date;
   toolsUsed?: string[];
   durationMs?: number;
+  requestId?: string;   // only present on live (non-historical) assistant messages
+  isPinned?: boolean;   // derived from localStorage on load
 }
 
 const CONV_KEY = (tenantId: number) => `ai_conv_${tenantId}`;
@@ -75,6 +77,7 @@ export function useChat() {
           timestamp: new Date(),
           toolsUsed: res.tools_used?.map((t) => t.name),
           durationMs: res.duration_ms,
+          requestId: res.request_id,
         };
         setMessages((prev) => [...prev, assistantMsg]);
 
