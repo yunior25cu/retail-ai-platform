@@ -6,6 +6,7 @@ import { useChat } from "@/hooks/useChat";
 import { WelcomeScreen } from "./WelcomeScreen";
 import { ChatMessage } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
+import { ContextBar } from "./ContextBar";
 import { api } from "@/api/client";
 
 interface Props {
@@ -77,6 +78,9 @@ export function ChatInterface({ externalConversationId, onConversationChange }: 
 
   return (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column", bgcolor: "#FFFFFF" }}>
+      {/* Context bar */}
+      {user && <ContextBar user={user} />}
+
       {/* Scrollable message area */}
       <Box sx={{ flex: 1, overflowY: "auto", pt: 3 }}>
         {messages.length === 0 ? (
