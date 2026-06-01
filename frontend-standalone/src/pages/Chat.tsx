@@ -19,6 +19,7 @@ export function Chat() {
         <ChatInterface
           externalConversationId={selectedConvId}
           onConversationChange={(id) => setCurrentConvId(id)}
+          onSelectConversation={(id) => setSelectedConvId(id)}
         />
       </Box>
     </AppShell>

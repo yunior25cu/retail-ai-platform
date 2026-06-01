@@ -1,17 +1,22 @@
-import { useEffect, useRef } from "react";
-import { Alert, Box, Typography } from "@mui/material";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, Box, Tab, Tabs, Typography } from "@mui/material";
 import { tokens } from "@/theme/tokens";
 import { useAuth } from "@/hooks/useAuth";
 import { useChat } from "@/hooks/useChat";
+import type { ChatMessage as ChatMessageType } from "@/hooks/useChat";
 import { WelcomeScreen } from "./WelcomeScreen";
 import { ChatMessage } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { ContextBar } from "./ContextBar";
+import { AiPinnedList } from "./AiPinnedList";
 import { api } from "@/api/client";
+import { getPins, togglePin, unpinMessage } from "@/utils/pins";
+import type { PinnedMessage } from "@/utils/pins";
 
 interface Props {
   externalConversationId?: string | null;
   onConversationChange?: (id: string) => void;
+  onSelectConversation?: (id: string) => void;
 }
 
 function TypingIndicator() {
@@ -39,13 +44,20 @@ function TypingIndicator() {
   );
 }
 
-export function ChatInterface({ externalConversationId, onConversationChange }: Props) {
+export function ChatInterface({ externalConversationId, onConversationChange, onSelectConversation }: Props) {
   const { user } = useAuth();
   const {
     messages, conversationId, isLoading, error,
     suggestions, sendMessage, loadConversation,
   } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<"chat" | "pins">("chat");
+  const [pins, setPins] = useState<PinnedMessage[]>([]);
+
+  // Load pins from localStorage on mount and when tenant changes
+  useEffect(() => {
+    if (user) setPins(getPins(user.tenant_id));
+  }, [user]);
 
   // Load external conversation when sidebar selection changes
   useEffect(() => {
@@ -60,6 +72,7 @@ export function ChatInterface({ externalConversationId, onConversationChange }: 
         durationMs: m.duration_ms ?? undefined,
       }));
       loadConversation(externalConversationId, mapped);
+      setActiveTab("chat");
     }).catch(() => null);
   }, [externalConversationId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -76,35 +89,91 @@ export function ChatInterface({ externalConversationId, onConversationChange }: 
     void sendMessage(text);
   };
 
+  const handleTogglePin = useCallback((msg: ChatMessageType) => {
+    if (!user || !conversationId) return;
+    const updated = togglePin(user.tenant_id, msg, conversationId);
+    setPins(updated);
+  }, [user, conversationId]);
+
+  const handleUnpin = useCallback((id: string) => {
+    if (!user) return;
+    const updated = unpinMessage(user.tenant_id, id);
+    setPins(updated);
+  }, [user]);
+
+  const handleOpenPinnedConversation = useCallback((convId: string) => {
+    onSelectConversation?.(convId);
+    setActiveTab("chat");
+  }, [onSelectConversation]);
+
+  // Enrich messages with isPinned from localStorage
+  const enrichedMessages = messages.map((m) => ({
+    ...m,
+    isPinned: user ? pins.some((p) => p.id === m.id) : false,
+  }));
+
   return (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column", bgcolor: "#FFFFFF" }}>
       {/* Context bar */}
       {user && <ContextBar user={user} />}
 
-      {/* Scrollable message area */}
-      <Box sx={{ flex: 1, overflowY: "auto", pt: 3 }}>
-        {messages.length === 0 ? (
-          <WelcomeScreen
-            vertical={user?.vertical ?? null}
-            suggestions={suggestions}
-            onSuggestion={handleSend}
+      {/* Tabs: Chat / Anclados */}
+      <Box sx={{ borderBottom: "1px solid", borderColor: "grey.200", px: 2 }}>
+        <Tabs
+          value={activeTab}
+          onChange={(_, v: "chat" | "pins") => setActiveTab(v)}
+          sx={{
+            minHeight: 36,
+            "& .MuiTab-root": { minHeight: 36, fontSize: "0.8rem", py: 0, textTransform: "none" },
+          }}
+        >
+          <Tab value="chat"  label="Chat" />
+          <Tab
+            value="pins"
+            label={pins.length > 0 ? `Anclados (${pins.length})` : "Anclados"}
           />
-        ) : (
-          <>
-            {messages.map((m) => <ChatMessage key={m.id} msg={m} />)}
-            {isLoading && <TypingIndicator />}
-            {error && (
-              <Box sx={{ maxWidth: tokens.chat.maxWidth, mx: "auto", px: 2, mb: 1 }}>
-                <Alert severity="warning">{error}</Alert>
-              </Box>
-            )}
-          </>
-        )}
-        <div ref={bottomRef} />
+        </Tabs>
       </Box>
 
-      {/* Input */}
-      <ChatInput onSend={handleSend} disabled={isLoading} />
+      {/* Tab content */}
+      {activeTab === "pins" ? (
+        <Box sx={{ flex: 1, overflow: "hidden" }}>
+          <AiPinnedList
+            pins={pins}
+            onUnpin={handleUnpin}
+            onOpenConversation={handleOpenPinnedConversation}
+          />
+        </Box>
+      ) : (
+        <>
+          {/* Scrollable message area */}
+          <Box sx={{ flex: 1, overflowY: "auto", pt: 3 }}>
+            {messages.length === 0 ? (
+              <WelcomeScreen
+                vertical={user?.vertical ?? null}
+                suggestions={suggestions}
+                onSuggestion={handleSend}
+              />
+            ) : (
+              <>
+                {enrichedMessages.map((m) => (
+                  <ChatMessage key={m.id} msg={m} onTogglePin={handleTogglePin} />
+                ))}
+                {isLoading && <TypingIndicator />}
+                {error && (
+                  <Box sx={{ maxWidth: tokens.chat.maxWidth, mx: "auto", px: 2, mb: 1 }}>
+                    <Alert severity="warning">{error}</Alert>
+                  </Box>
+                )}
+              </>
+            )}
+            <div ref={bottomRef} />
+          </Box>
+
+          {/* Input */}
+          <ChatInput onSend={handleSend} disabled={isLoading} />
+        </>
+      )}
     </Box>
   );
 }
