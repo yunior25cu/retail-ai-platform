@@ -54,7 +54,11 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
     suggestions, sendMessage, loadConversation,
   } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
-  const canSeeMetrics = user?.role === "direccion";
+  // Metrics visible for admin roles in both verticals:
+  // - direccion   → retail vertical director
+  // - admin_tenant → tenant admin (produccion/other verticals)
+  // - superadmin / super_admin → platform admin
+  const canSeeMetrics = ["direccion", "admin_tenant", "superadmin", "super_admin"].includes(user?.role ?? "");
   const [activeTab, setActiveTab] = useState<"chat" | "pins" | "metrics">("chat");
   const [pins, setPins] = useState<PinnedMessage[]>([]);
 
