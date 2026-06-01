@@ -213,7 +213,11 @@ async def get_component_requirements(
     db: Any = None,
 ) -> dict[str, Any]:
     schema = get_schema(tenant_id)
-    today = current_date_expr(tenant_id)
+    pg = is_postgres(tenant_id)
+    # Use latest available snapshot — same rationale as get_component_stock
+    latest_snap = (
+        f"(SELECT MAX(snapshot_date) FROM {schema}.fact_component_stock WHERE tenant_id = ?)"
+    )
 
     sql_n2 = f"""
         SELECT
@@ -234,7 +238,7 @@ async def get_component_requirements(
         LEFT JOIN {schema}.fact_component_stock cs
             ON  cs.tenant_id     = ?
             AND cs.component_sku = rp.component_sku
-            AND cs.snapshot_date = {today}
+            AND cs.snapshot_date = {latest_snap}
         WHERE rp.tenant_id   = ?
           AND rp.product_sku = ?
           AND rp.is_active   = 1
@@ -243,8 +247,9 @@ async def get_component_requirements(
     """
     n2_rows = await execute_query_tenant(
         sql_n2,
+        # Extra tenant_id at position 6 is for the latest_snap subquery
         (units_to_produce, units_to_produce, units_to_produce,
-         units_to_produce, tenant_id, tenant_id, sku_code),
+         units_to_produce, tenant_id, tenant_id, tenant_id, sku_code),
         tenant_id=tenant_id,
     )
 
@@ -275,7 +280,7 @@ async def get_component_requirements(
         LEFT JOIN {schema}.fact_component_stock cs
             ON  cs.tenant_id     = ?
             AND cs.component_sku = rg.component_sku
-            AND cs.snapshot_date = {today}
+            AND cs.snapshot_date = {latest_snap}
         WHERE rg.tenant_id = ?
           AND rg.is_active  = 1
         ORDER BY qty_missing DESC, rg.component_type, rg.component_sku
@@ -283,7 +288,8 @@ async def get_component_requirements(
     """
     n1_rows = await execute_query_tenant(
         sql_n1,
-        (units_to_produce, tenant_id, sku_code, tenant_id, tenant_id),
+        # Extra tenant_id at position 5 is for the latest_snap subquery
+        (units_to_produce, tenant_id, sku_code, tenant_id, tenant_id, tenant_id),
         tenant_id=tenant_id,
     )
 
@@ -504,11 +510,15 @@ async def get_component_stock(
 
     schema = get_schema(tenant_id)
     pg = is_postgres(tenant_id)
-    today = current_date_expr(tenant_id)
     _one = "TRUE" if pg else "1"
     top_clause   = "" if pg else "TOP 20"
     limit_clause = "LIMIT 20" if pg else ""
     nulls_last   = "NULLS LAST" if pg else ""
+    # Always use the latest available snapshot — not strictly CURRENT_DATE, so
+    # the tool works even when the daily migration hasn't run yet today.
+    latest_snap = (
+        f"(SELECT MAX(snapshot_date) FROM {schema}.fact_component_stock WHERE tenant_id = ?)"
+    )
 
     if tipo_norm == "criticos":
         where_extra = f"AND cs.is_critical = {_one}"
@@ -536,16 +546,18 @@ async def get_component_stock(
             cs.unit_of_measure,
             cs.is_critical,
             cs.is_low,
-            cs.stock_min
+            cs.stock_min,
+            cs.snapshot_date
         FROM {schema}.fact_component_stock cs
         WHERE cs.tenant_id     = ?
-          AND cs.snapshot_date = {today}
+          AND cs.snapshot_date = {latest_snap}
           {where_extra}
         ORDER BY cs.is_critical DESC,
                  cs.is_low     DESC {nulls_last}
         {limit_clause};
     """
-    params = (tenant_id,) + extra_params
+    # First ? = tenant_id for the main WHERE, second ? = tenant_id for latest_snap subquery
+    params = (tenant_id, tenant_id) + extra_params
     rows = await execute_query_tenant(sql, params, tenant_id=tenant_id)
 
     result = {
