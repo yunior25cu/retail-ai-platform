@@ -6,7 +6,7 @@ import { tokens } from "@/theme/tokens";
 interface Props {
   pins: PinnedMessage[];
   onUnpin: (id: string) => void;
-  onOpenConversation: (conversationId: string) => void;
+  onOpenConversation: (conversationId: string, content: string) => void;
 }
 
 function formatRelative(iso: string): string {
@@ -52,7 +52,7 @@ export function AiPinnedList({ pins, onUnpin, onOpenConversation }: Props) {
             "&:hover": { borderColor: tokens.brand.primary, bgcolor: `${tokens.brand.primary}10` },
             position: "relative",
           }}
-          onClick={() => onOpenConversation(pin.conversationId)}
+          onClick={() => onOpenConversation(pin.conversationId, pin.content)}
         >
           <Typography
             variant="body2"

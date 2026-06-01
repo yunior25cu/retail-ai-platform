@@ -1,6 +1,7 @@
 /**
- * Pin management — localStorage-based, scoped per tenant.
- * Max 10 pins per tenant.
+ * Pin management — localStorage-based, scoped per user (not per tenant).
+ * Key: ai_pinned_${tenantId}_${userId}   ← prevents cross-user leakage.
+ * Max 10 pins per user.
  */
 
 import type { ChatMessage } from "@/hooks/useChat";
@@ -14,50 +15,52 @@ export interface PinnedMessage {
   pinnedAt: string; // ISO string
 }
 
-function storageKey(tenantId: number) {
-  return `ai_pinned_${tenantId}`;
+function storageKey(tenantId: number, userId: string): string {
+  return `ai_pinned_${tenantId}_${userId}`;
 }
 
-export function getPins(tenantId: number): PinnedMessage[] {
+export function getPins(tenantId: number, userId: string): PinnedMessage[] {
   try {
-    const raw = localStorage.getItem(storageKey(tenantId));
+    const raw = localStorage.getItem(storageKey(tenantId, userId));
     return raw ? (JSON.parse(raw) as PinnedMessage[]) : [];
   } catch {
     return [];
   }
 }
 
-export function isPinned(tenantId: number, msgId: string): boolean {
-  return getPins(tenantId).some((p) => p.id === msgId);
+export function isPinned(tenantId: number, userId: string, msgId: string): boolean {
+  return getPins(tenantId, userId).some((p) => p.id === msgId);
 }
 
 export function pinMessage(
   tenantId: number,
+  userId: string,
   msg: ChatMessage,
   conversationId: string
 ): PinnedMessage[] {
-  const pins = getPins(tenantId);
+  const pins = getPins(tenantId, userId);
   if (pins.some((p) => p.id === msg.id)) return pins;
   const updated = [
     { id: msg.id, content: msg.content, conversationId, pinnedAt: new Date().toISOString() },
     ...pins,
   ].slice(0, MAX_PINS);
-  localStorage.setItem(storageKey(tenantId), JSON.stringify(updated));
+  localStorage.setItem(storageKey(tenantId, userId), JSON.stringify(updated));
   return updated;
 }
 
-export function unpinMessage(tenantId: number, msgId: string): PinnedMessage[] {
-  const updated = getPins(tenantId).filter((p) => p.id !== msgId);
-  localStorage.setItem(storageKey(tenantId), JSON.stringify(updated));
+export function unpinMessage(tenantId: number, userId: string, msgId: string): PinnedMessage[] {
+  const updated = getPins(tenantId, userId).filter((p) => p.id !== msgId);
+  localStorage.setItem(storageKey(tenantId, userId), JSON.stringify(updated));
   return updated;
 }
 
 export function togglePin(
   tenantId: number,
+  userId: string,
   msg: ChatMessage,
   conversationId: string
 ): PinnedMessage[] {
-  return isPinned(tenantId, msg.id)
-    ? unpinMessage(tenantId, msg.id)
-    : pinMessage(tenantId, msg, conversationId);
+  return isPinned(tenantId, userId, msg.id)
+    ? unpinMessage(tenantId, userId, msg.id)
+    : pinMessage(tenantId, userId, msg, conversationId);
 }

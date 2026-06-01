@@ -58,9 +58,12 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
   const [activeTab, setActiveTab] = useState<"chat" | "pins" | "metrics">("chat");
   const [pins, setPins] = useState<PinnedMessage[]>([]);
 
-  // Load pins from localStorage on mount and when tenant changes
+  // Content of the pinned message we need to scroll to after conversation loads
+  const [pendingScrollContent, setPendingScrollContent] = useState<string | null>(null);
+
+  // Load pins scoped to THIS user (tenant + userId prevents cross-user leakage)
   useEffect(() => {
-    if (user) setPins(getPins(user.tenant_id));
+    if (user) setPins(getPins(user.tenant_id, user.id));
   }, [user]);
 
   // Load external conversation when sidebar selection changes
@@ -85,9 +88,39 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
     if (conversationId) onConversationChange?.(conversationId);
   }, [conversationId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-scroll to bottom on new messages (only when no pin scroll is pending)
   useEffect(() => {
+    if (pendingScrollContent) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, pendingScrollContent]);
+
+  // Scroll to pinned message after the conversation finishes loading
+  useEffect(() => {
+    if (!pendingScrollContent || messages.length === 0) return;
+
+    const idx = messages.findIndex(
+      (m) => m.role === "assistant" && m.content.trim() === pendingScrollContent.trim()
+    );
+
+    // Clear pending regardless — if not found, nothing to scroll to
+    setPendingScrollContent(null);
+
+    if (idx === -1) return;
+
+    // Defer until after React paints the new messages
+    setTimeout(() => {
+      const el = document.getElementById(`chat-msg-${idx}`);
+      if (!el) return;
+
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+
+      // Brief highlight flash using inline style (no extra state/props needed)
+      el.style.backgroundColor = `${tokens.brand.primary}22`;
+      setTimeout(() => {
+        el.style.backgroundColor = "";
+      }, 1600);
+    }, 120);
+  }, [messages, pendingScrollContent]);
 
   const handleSend = (text: string) => {
     void sendMessage(text);
@@ -95,22 +128,24 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
 
   const handleTogglePin = useCallback((msg: ChatMessageType) => {
     if (!user || !conversationId) return;
-    const updated = togglePin(user.tenant_id, msg, conversationId);
+    const updated = togglePin(user.tenant_id, user.id, msg, conversationId);
     setPins(updated);
   }, [user, conversationId]);
 
   const handleUnpin = useCallback((id: string) => {
     if (!user) return;
-    const updated = unpinMessage(user.tenant_id, id);
+    const updated = unpinMessage(user.tenant_id, user.id, id);
     setPins(updated);
   }, [user]);
 
-  const handleOpenPinnedConversation = useCallback((convId: string) => {
+  // Opens the conversation containing the pin AND queues a scroll to the exact message
+  const handleOpenPinnedConversation = useCallback((convId: string, content: string) => {
+    setPendingScrollContent(content);
     onSelectConversation?.(convId);
     setActiveTab("chat");
   }, [onSelectConversation]);
 
-  // Enrich messages with isPinned from localStorage
+  // Enrich messages with isPinned (keyed to this user's pins)
   const enrichedMessages = messages.map((m) => ({
     ...m,
     isPinned: user ? pins.some((p) => p.id === m.id) : false,
@@ -121,7 +156,7 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
       {/* Context bar */}
       {user && <ContextBar user={user} />}
 
-      {/* Tabs: Chat / Anclados + Export button */}
+      {/* Tabs: Chat / Anclados [/ Métricas] + Export button */}
       <Box sx={{ borderBottom: "1px solid", borderColor: "grey.200", px: 2, display: "flex", alignItems: "center" }}>
         <Tabs
           value={activeTab}
@@ -173,8 +208,13 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
               />
             ) : (
               <>
-                {enrichedMessages.map((m) => (
-                  <ChatMessage key={m.id} msg={m} onTogglePin={handleTogglePin} />
+                {enrichedMessages.map((m, i) => (
+                  <ChatMessage
+                    key={m.id}
+                    msg={m}
+                    onTogglePin={handleTogglePin}
+                    elementId={`chat-msg-${i}`}
+                  />
                 ))}
                 {isLoading && <TypingIndicator />}
                 {error && (

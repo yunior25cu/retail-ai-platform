@@ -18,9 +18,10 @@ import { FeedbackPopover } from "./FeedbackPopover";
 interface Props {
   msg: ChatMessageType;
   onTogglePin?: (msg: ChatMessageType) => void;
+  elementId?: string;
 }
 
-export function ChatMessage({ msg, onTogglePin }: Props) {
+export function ChatMessage({ msg, onTogglePin, elementId }: Props) {
   const isUser = msg.role === "user";
   const [feedbackSent, setFeedbackSent] = useState<"positive" | "negative" | null>(null);
   const [popoverAnchor, setPopoverAnchor] = useState<HTMLElement | null>(null);
@@ -41,6 +42,7 @@ export function ChatMessage({ msg, onTogglePin }: Props) {
 
   return (
     <Box
+      id={elementId}
       sx={{
         display: "flex",
         flexDirection: isUser ? "row-reverse" : "row",
@@ -51,6 +53,8 @@ export function ChatMessage({ msg, onTogglePin }: Props) {
         mx: "auto",
         width: "100%",
         px: 2,
+        borderRadius: 2,
+        transition: "background-color 0.4s ease",
       }}
     >
       {/* AI avatar */}
