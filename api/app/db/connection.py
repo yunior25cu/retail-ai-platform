@@ -38,10 +38,16 @@ class ConnectionPool:
         with self._lock:
             if self._initialized:
                 return
-            for _ in range(self._size):
-                self._pool.put(pyodbc.connect(self._conn_str, autocommit=True))
-            self._initialized = True
-            log.info("db.pool.initialized", size=self._size)
+            try:
+                for _ in range(self._size):
+                    self._pool.put(pyodbc.connect(self._conn_str, autocommit=True))
+                self._initialized = True
+                log.info("db.pool.initialized", size=self._size)
+            except Exception as exc:  # noqa: BLE001
+                # SQL Server unavailable (standalone / PG-only environment).
+                # Mark as degraded so queries return empty results instead of crashing.
+                self._initialized = False
+                log.warning("db.pool.unavailable", error=str(exc))
 
     def close_all(self) -> None:
         with self._lock:
@@ -56,9 +62,12 @@ class ConnectionPool:
 
     @contextmanager
     def acquire(self):
-        """Yield a connection; return it to the pool on exit."""
+        """Yield a connection; return it to the pool on exit.
+        Raises RuntimeError if the pool is degraded (SQL Server unavailable)."""
         if not self._initialized:
             self.initialize()
+        if not self._initialized:
+            raise RuntimeError("SQL Server connection pool unavailable (standalone/PG-only mode)")
         conn = self._pool.get(timeout=10)
         try:
             yield conn
@@ -89,10 +98,17 @@ async def execute_query(
 ) -> list[dict[str, Any]]:
     """Run a parametrised SELECT and return list-of-dict rows.
 
+    Returns empty list when SQL Server is unavailable (standalone/PG-only mode).
     Use ONLY parameterised queries: pass placeholders (``?``) in ``query`` and
     values in ``params``. Never f-string user input into the SQL.
     """
-    return await asyncio.to_thread(_execute_sync, query, params)
+    try:
+        return await asyncio.to_thread(_execute_sync, query, params)
+    except RuntimeError as e:
+        if "unavailable" in str(e):
+            log.debug("db.execute_query.skipped", reason="SQL Server unavailable")
+            return []
+        raise
 
 
 async def ping() -> dict[str, Any]:

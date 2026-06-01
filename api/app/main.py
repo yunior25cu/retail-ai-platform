@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
         gold_db_host=settings.sql_server,
         gold_db_name=settings.sql_database,
     )
-    pool.initialize()
+    pool.initialize()  # fault-tolerant: logs warning if SQL Server unavailable
     try:
         yield
     finally:
