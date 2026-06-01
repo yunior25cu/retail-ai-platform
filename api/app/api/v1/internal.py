@@ -205,11 +205,11 @@ async def internal_chat(
         )
         raise HTTPException(status_code=500, detail="internal_error") from e
 
-    await append_message(conversation_id=conv_id, role="user", content=payload.message)
+    await append_message(conversation_id=conv_id, role="user", content=payload.message, tenant_id=auth.tenant_id)
     await append_message(
-        conversation_id=conv_id, role="assistant", content=result.response_text
+        conversation_id=conv_id, role="assistant", content=result.response_text, tenant_id=auth.tenant_id
     )
-    await touch_conversation(conv_id)
+    await touch_conversation(conv_id, tenant_id=auth.tenant_id)
 
     audit_status = (
         "PARTIAL"

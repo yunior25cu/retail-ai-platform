@@ -83,6 +83,9 @@ export function Sidebar({ conversationId, onSelectConversation, onNewConversatio
 
   useEffect(() => { loadConversations(); }, [loadConversations]);
 
+  // Refresh list when active conversation changes (new conversation created)
+  useEffect(() => { if (conversationId) loadConversations(); }, [conversationId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const groups = groupByDate(conversations);
   const canConfig = user && ["super_admin", "superadmin", "admin_tenant", "direccion"].includes(user.role);
   const canAdmin  = user && ["super_admin", "superadmin"].includes(user.role);

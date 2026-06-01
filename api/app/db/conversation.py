@@ -1,6 +1,10 @@
 """Persistence helpers for multi-turn chat: conversations, messages,
 sanitiser token maps.
 
+Routing:
+  PG tenants (e.g. tenant 24) → audit.conversation / audit.conversation_message
+  SS tenants                  → api_audit.conversation / api_audit.conversation_message
+
 Every query is tenant-scoped. Loading a conversation that belongs to a
 different tenant returns None.
 """
@@ -9,98 +13,172 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from app.db.connection import execute_query
 
 
 # ---------------------------------------------------------------------------
+# Internal PG helpers
+# ---------------------------------------------------------------------------
+
+async def _pg_execute(sql: str, params: tuple) -> list[dict[str, Any]]:
+    """Run a read or write query against PostgreSQL conversation tables."""
+    from app.db.connections import _execute_pg
+    return await _execute_pg(sql, params)
+
+
+async def _pg_write(sql: str, params: tuple) -> None:
+    """Run a write (INSERT/UPDATE) against PostgreSQL with commit."""
+    from app.db.connections import _execute_pg_write
+    await _execute_pg_write(sql, params)
+
+
+def _is_pg(tenant_id: int) -> bool:
+    from app.db.connections import is_postgres
+    return is_postgres(tenant_id)
+
+
+# ---------------------------------------------------------------------------
 # Conversation
 # ---------------------------------------------------------------------------
+
 async def create_conversation(
     *, tenant_id: int, user_id: str, user_role: str, title: str | None = None
 ) -> str:
     """Create a new conversation row; return its uuid string."""
     cid = str(uuid4())
-    sql = """
-        INSERT INTO api_audit.conversation
-            (conversation_id, tenant_id, user_id, user_role, title, last_message_at)
-        VALUES (CAST(? AS UNIQUEIDENTIFIER), ?, ?, ?, ?, SYSUTCDATETIME());
-    """
-    await execute_query(sql, (cid, tenant_id, user_id, user_role, title))
+
+    if _is_pg(tenant_id):
+        await _pg_write(
+            """INSERT INTO audit.conversation
+                   (conversation_id, tenant_id, user_id, user_role, title)
+               VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (conversation_id) DO NOTHING""",
+            (cid, tenant_id, user_id, user_role, title),
+        )
+    else:
+        await execute_query(
+            """INSERT INTO api_audit.conversation
+                   (conversation_id, tenant_id, user_id, user_role, title, last_message_at)
+               VALUES (CAST(? AS UNIQUEIDENTIFIER), ?, ?, ?, ?, SYSUTCDATETIME());""",
+            (cid, tenant_id, user_id, user_role, title),
+        )
     return cid
 
 
 async def load_conversation(
     conversation_id: str, *, tenant_id: int
 ) -> dict[str, Any] | None:
-    """Return the conversation row if it belongs to ``tenant_id``; None otherwise.
-
-    Tenant isolation is enforced here: a /chat call with a foreign
-    conversation_id returns None and the endpoint surfaces 404 to the caller.
-    """
-    sql = """
-        SELECT CAST(conversation_id AS NVARCHAR(50)) AS conversation_id,
-               tenant_id, user_id, user_role, title
-        FROM api_audit.conversation
-        WHERE tenant_id = ? AND conversation_id = CAST(? AS UNIQUEIDENTIFIER);
-    """
-    rows = await execute_query(sql, (tenant_id, conversation_id))
+    """Return the conversation row if it belongs to ``tenant_id``; None otherwise."""
+    if _is_pg(tenant_id):
+        rows = await _pg_execute(
+            """SELECT conversation_id, tenant_id, user_id, user_role, title
+               FROM audit.conversation
+               WHERE tenant_id = %s AND conversation_id = %s""",
+            (tenant_id, conversation_id),
+        )
+    else:
+        rows = await execute_query(
+            """SELECT CAST(conversation_id AS NVARCHAR(50)) AS conversation_id,
+                      tenant_id, user_id, user_role, title
+               FROM api_audit.conversation
+               WHERE tenant_id = ? AND conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
+            (tenant_id, conversation_id),
+        )
     return rows[0] if rows else None
 
 
-async def touch_conversation(conversation_id: str) -> None:
-    await execute_query(
-        """UPDATE api_audit.conversation
-           SET last_message_at = SYSUTCDATETIME()
-           WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
-        (conversation_id,),
-    )
+async def touch_conversation(conversation_id: str, tenant_id: int = 0) -> None:
+    if _is_pg(tenant_id):
+        await _pg_write(
+            """UPDATE audit.conversation
+               SET last_message_at = NOW()
+               WHERE conversation_id = %s""",
+            (conversation_id,),
+        )
+    else:
+        await execute_query(
+            """UPDATE api_audit.conversation
+               SET last_message_at = SYSUTCDATETIME()
+               WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
+            (conversation_id,),
+        )
 
 
 # ---------------------------------------------------------------------------
-# Messages (anthropic-format blocks serialised to JSON)
+# Messages
 # ---------------------------------------------------------------------------
+
 async def append_message(
-    *, conversation_id: str, role: str, content: Any
+    *, conversation_id: str, role: str, content: Any, tenant_id: int = 0
 ) -> int:
     """Append a message; return its sequence number (1-based)."""
-    next_seq_rows = await execute_query(
-        """SELECT ISNULL(MAX(sequence), 0) + 1 AS seq
-           FROM api_audit.conversation_message
-           WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
-        (conversation_id,),
-    )
-    seq = int(next_seq_rows[0]["seq"])
-    await execute_query(
-        """INSERT INTO api_audit.conversation_message
-               (conversation_id, sequence, role, content_json)
-           VALUES (CAST(? AS UNIQUEIDENTIFIER), ?, ?, ?);""",
-        (conversation_id, seq, role, json.dumps(content, default=str, ensure_ascii=False)),
-    )
-    return seq
+    content_json = json.dumps(content, default=str, ensure_ascii=False)
+
+    if _is_pg(tenant_id):
+        rows = await _pg_execute(
+            """SELECT COALESCE(MAX(sequence), 0) + 1 AS seq
+               FROM audit.conversation_message
+               WHERE conversation_id = %s""",
+            (conversation_id,),
+        )
+        seq = int(rows[0]["seq"]) if rows else 1
+        await _pg_write(
+            """INSERT INTO audit.conversation_message
+                   (conversation_id, sequence, role, content_json)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (conversation_id, sequence) DO NOTHING""",
+            (conversation_id, seq, role, content_json),
+        )
+        return seq
+    else:
+        next_seq_rows = await execute_query(
+            """SELECT ISNULL(MAX(sequence), 0) + 1 AS seq
+               FROM api_audit.conversation_message
+               WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
+            (conversation_id,),
+        )
+        seq = int(next_seq_rows[0]["seq"]) if next_seq_rows else 1
+        await execute_query(
+            """INSERT INTO api_audit.conversation_message
+                   (conversation_id, sequence, role, content_json)
+               VALUES (CAST(? AS UNIQUEIDENTIFIER), ?, ?, ?);""",
+            (conversation_id, seq, role, content_json),
+        )
+        return seq
 
 
-async def load_messages(conversation_id: str) -> list[dict[str, Any]]:
-    """Return all messages in Anthropic format (role + content), oldest first."""
-    rows = await execute_query(
-        """SELECT role, content_json
-           FROM api_audit.conversation_message
-           WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER)
-           ORDER BY sequence ASC;""",
-        (conversation_id,),
-    )
+async def load_messages(conversation_id: str, tenant_id: int = 0) -> list[dict[str, Any]]:
+    """Return all messages in Anthropic format, oldest first."""
+    if _is_pg(tenant_id):
+        rows = await _pg_execute(
+            """SELECT role, content_json FROM audit.conversation_message
+               WHERE conversation_id = %s ORDER BY sequence ASC""",
+            (conversation_id,),
+        )
+    else:
+        rows = await execute_query(
+            """SELECT role, content_json FROM api_audit.conversation_message
+               WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER)
+               ORDER BY sequence ASC;""",
+            (conversation_id,),
+        )
     return _parse_message_rows(rows)
 
 
-async def count_messages(conversation_id: str) -> int:
-    """Return the total number of messages stored for the conversation."""
-    rows = await execute_query(
-        """SELECT COUNT(*) AS cnt
-           FROM api_audit.conversation_message
-           WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
-        (conversation_id,),
-    )
+async def count_messages(conversation_id: str, tenant_id: int = 0) -> int:
+    if _is_pg(tenant_id):
+        rows = await _pg_execute(
+            "SELECT COUNT(*) AS cnt FROM audit.conversation_message WHERE conversation_id = %s",
+            (conversation_id,),
+        )
+    else:
+        rows = await execute_query(
+            """SELECT COUNT(*) AS cnt FROM api_audit.conversation_message
+               WHERE conversation_id = CAST(? AS UNIQUEIDENTIFIER);""",
+            (conversation_id,),
+        )
     return int(rows[0]["cnt"]) if rows else 0
 
 
@@ -110,36 +188,42 @@ async def load_recent_messages(
     tenant_id: int,
     turns: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the last *turns* user+assistant pairs, oldest first.
-
-    One turn = one user message + one assistant message (2 rows).
-    If *turns* is None, ``settings.memory_turns_per_request`` is used.
-    The tenant_id is verified via a subquery (defense-in-depth; the conversation
-    is already validated by ``load_conversation`` at request time).
-    """
+    """Return the last *turns* user+assistant pairs, oldest first."""
     from app.config import settings
 
     effective_turns = turns if turns is not None else settings.memory_turns_per_request
-    limit = effective_turns * 2  # 2 messages per turn
+    limit = effective_turns * 2
 
-    # Fetch newest `limit` messages in DESC order, then reverse for chronological.
-    rows = await execute_query(
-        """SELECT TOP (?) role, content_json
-           FROM api_audit.conversation_message cm
-           WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
-             AND EXISTS (
-                 SELECT 1 FROM api_audit.conversation c
-                 WHERE c.conversation_id = cm.conversation_id
-                   AND c.tenant_id = ?
-             )
-           ORDER BY cm.sequence DESC;""",
-        (limit, conversation_id, tenant_id),
-    )
+    if _is_pg(tenant_id):
+        rows = await _pg_execute(
+            """SELECT role, content_json
+               FROM audit.conversation_message
+               WHERE conversation_id = %s
+                 AND EXISTS (
+                     SELECT 1 FROM audit.conversation c
+                     WHERE c.conversation_id = %s AND c.tenant_id = %s
+                 )
+               ORDER BY sequence DESC
+               LIMIT %s""",
+            (conversation_id, conversation_id, tenant_id, limit),
+        )
+    else:
+        rows = await execute_query(
+            """SELECT TOP (?) role, content_json
+               FROM api_audit.conversation_message cm
+               WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
+                 AND EXISTS (
+                     SELECT 1 FROM api_audit.conversation c
+                     WHERE c.conversation_id = cm.conversation_id
+                       AND c.tenant_id = ?
+                 )
+               ORDER BY cm.sequence DESC;""",
+            (limit, conversation_id, tenant_id),
+        )
     return _parse_message_rows(reversed(rows))
 
 
 def _parse_message_rows(rows: Any) -> list[dict[str, Any]]:
-    """Deserialise content_json → Anthropic message dicts. Skips malformed rows."""
     out: list[dict[str, Any]] = []
     for r in rows:
         try:
@@ -155,9 +239,8 @@ def _parse_message_rows(rows: Any) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _extract_title(content_json: str | None, max_len: int = 40) -> str:
-    """Return a display title from the first user message content_json."""
     if not content_json:
-        return "Nueva conversación"
+        return "Nueva conversacion"
     try:
         parsed = json.loads(content_json)
         if isinstance(parsed, str):
@@ -169,13 +252,12 @@ def _extract_title(content_json: str | None, max_len: int = 40) -> str:
             )
         else:
             text = str(parsed)
-        return text[:max_len] if text.strip() else "Nueva conversación"
+        return text[:max_len] if text.strip() else "Nueva conversacion"
     except (TypeError, json.JSONDecodeError):
-        return "Nueva conversación"
+        return "Nueva conversacion"
 
 
 def _extract_content_text(content_json: str) -> str:
-    """Flatten content_json to a plain string for history display."""
     try:
         parsed = json.loads(content_json)
         if isinstance(parsed, str):
@@ -194,42 +276,50 @@ def _extract_content_text(content_json: str) -> str:
 async def fetch_conversations(
     tenant_id: int, user_id: int, limit: int = 20
 ) -> list[dict[str, Any]]:
-    """Return the most recent *limit* conversations for *user_id* under *tenant_id*.
-
-    Tenant + user isolation enforced via WHERE predicates.
-    """
+    """Return the most recent *limit* conversations for *user_id* under *tenant_id*."""
     user_id_str = str(user_id)
-    rows = await execute_query(
-        """
-        SELECT TOP (?)
-            CAST(c.conversation_id AS NVARCHAR(50)) AS conversation_id,
-            CONVERT(NVARCHAR(30), ISNULL(c.last_message_at, c.started_at), 127)
-                AS last_message_at,
-            (
-                SELECT COUNT(*)
-                FROM api_audit.conversation_message cm2
-                WHERE cm2.conversation_id = c.conversation_id
-            ) AS message_count,
-            (
-                SELECT TOP 1 cm.content_json
-                FROM api_audit.conversation_message cm
-                WHERE cm.conversation_id = c.conversation_id
-                  AND cm.role = 'user'
-                ORDER BY cm.sequence ASC
-            ) AS first_message_json
-        FROM api_audit.conversation c
-        WHERE c.tenant_id = ?
-          AND c.user_id = ?
-        ORDER BY ISNULL(c.last_message_at, c.started_at) DESC;
-        """,
-        (limit, tenant_id, user_id_str),
-    )
+
+    if _is_pg(tenant_id):
+        rows = await _pg_execute(
+            """SELECT c.conversation_id,
+                      c.last_message_at,
+                      (SELECT COUNT(*) FROM audit.conversation_message cm2
+                       WHERE cm2.conversation_id = c.conversation_id) AS message_count,
+                      (SELECT cm.content_json
+                       FROM audit.conversation_message cm
+                       WHERE cm.conversation_id = c.conversation_id AND cm.role = 'user'
+                       ORDER BY cm.sequence ASC LIMIT 1) AS first_message_json
+               FROM audit.conversation c
+               WHERE c.tenant_id = %s AND c.user_id = %s
+               ORDER BY COALESCE(c.last_message_at, c.started_at) DESC
+               LIMIT %s""",
+            (tenant_id, user_id_str, limit),
+        )
+    else:
+        rows = await execute_query(
+            """SELECT TOP (?)
+                   CAST(c.conversation_id AS NVARCHAR(50)) AS conversation_id,
+                   CONVERT(NVARCHAR(30), ISNULL(c.last_message_at, c.started_at), 127)
+                       AS last_message_at,
+                   (SELECT COUNT(*) FROM api_audit.conversation_message cm2
+                    WHERE cm2.conversation_id = c.conversation_id) AS message_count,
+                   (SELECT TOP 1 cm.content_json
+                    FROM api_audit.conversation_message cm
+                    WHERE cm.conversation_id = c.conversation_id AND cm.role = 'user'
+                    ORDER BY cm.sequence ASC) AS first_message_json
+               FROM api_audit.conversation c
+               WHERE c.tenant_id = ? AND c.user_id = ?
+               ORDER BY ISNULL(c.last_message_at, c.started_at) DESC;""",
+            (limit, tenant_id, user_id_str),
+        )
+
     result: list[dict[str, Any]] = []
     for row in rows:
+        lma = row.get("last_message_at")
         result.append({
             "conversation_id": row["conversation_id"],
             "title": _extract_title(row.get("first_message_json")),
-            "last_message_at": row["last_message_at"],
+            "last_message_at": lma.isoformat() if hasattr(lma, "isoformat") else str(lma) if lma else None,
             "message_count": int(row["message_count"] or 0),
         })
     return result
@@ -238,39 +328,55 @@ async def fetch_conversations(
 async def fetch_conversation_messages_for_history(
     conversation_id: str, tenant_id: int
 ) -> list[dict[str, Any]]:
-    """Return all messages for *conversation_id*, validating tenant ownership.
-
-    The INNER JOIN on api_audit.conversation ensures a cross-tenant request
-    returns zero rows (the conversation simply won't match).
-    """
-    rows = await execute_query(
-        """
-        SELECT cm.role, cm.content_json,
-               CONVERT(NVARCHAR(30), cm.created_at, 127) AS created_at
-        FROM api_audit.conversation_message cm
-        INNER JOIN api_audit.conversation c
-            ON c.conversation_id = cm.conversation_id
-           AND c.tenant_id = ?
-        WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
-        ORDER BY cm.sequence ASC;
-        """,
-        (tenant_id, conversation_id),
-    )
-    return [
-        {
-            "role": row["role"],
-            "content": _extract_content_text(row["content_json"]),
-            "tools_used": None,
-            "duration_ms": None,
-            "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
+    """Return all messages for *conversation_id*, validating tenant ownership."""
+    if _is_pg(tenant_id):
+        rows = await _pg_execute(
+            """SELECT cm.role, cm.content_json, cm.created_at
+               FROM audit.conversation_message cm
+               INNER JOIN audit.conversation c
+                   ON c.conversation_id = cm.conversation_id
+                  AND c.tenant_id = %s
+               WHERE cm.conversation_id = %s
+               ORDER BY cm.sequence ASC""",
+            (tenant_id, conversation_id),
+        )
+        return [
+            {
+                "role": row["role"],
+                "content": _extract_content_text(row["content_json"]),
+                "tools_used": None,
+                "duration_ms": None,
+                "created_at": row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
+            }
+            for row in rows
+        ]
+    else:
+        rows = await execute_query(
+            """SELECT cm.role, cm.content_json,
+                      CONVERT(NVARCHAR(30), cm.created_at, 127) AS created_at
+               FROM api_audit.conversation_message cm
+               INNER JOIN api_audit.conversation c
+                   ON c.conversation_id = cm.conversation_id AND c.tenant_id = ?
+               WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
+               ORDER BY cm.sequence ASC;""",
+            (tenant_id, conversation_id),
+        )
+        return [
+            {
+                "role": row["role"],
+                "content": _extract_content_text(row["content_json"]),
+                "tools_used": None,
+                "duration_ms": None,
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
 
 # ---------------------------------------------------------------------------
-# Token map (sanitiser)
+# Token map (sanitiser) — SQL Server only (retail tenants use sanitiser)
 # ---------------------------------------------------------------------------
+
 async def insert_token_mapping(
     *,
     conversation_id: str,
@@ -300,7 +406,6 @@ async def find_token_for_entity(
 
 
 async def load_token_map(conversation_id: str) -> list[dict[str, Any]]:
-    """Return all token mappings for a conversation (used by the de-tokeniser)."""
     return await execute_query(
         """SELECT token, entity_type, entity_id, display_name
            FROM api_audit.conversation_token_map
@@ -309,9 +414,6 @@ async def load_token_map(conversation_id: str) -> list[dict[str, Any]]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Display-name lookups for new tokens (sanitiser builds these once per entity)
-# ---------------------------------------------------------------------------
 async def fetch_display_names(
     tenant_id: int, *, sku_ids: list[int], store_ids: list[int], brand_ids: list[int]
 ) -> dict[tuple[str, int], str]:

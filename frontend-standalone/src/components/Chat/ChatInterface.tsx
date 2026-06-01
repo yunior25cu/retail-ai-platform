@@ -51,7 +51,7 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
   const { user } = useAuth();
   const {
     messages, conversationId, isLoading, error,
-    suggestions, sendMessage, loadConversation,
+    suggestions, sendMessage, loadConversation, clearConversation,
   } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
   // Metrics visible for admin roles in both verticals:
@@ -69,6 +69,15 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
   useEffect(() => {
     if (user) setPins(getPins(user.tenant_id, user.id));
   }, [user]);
+
+  // "Nueva conversación" — externalConversationId goes null while messages exist
+  useEffect(() => {
+    if (externalConversationId === null && messages.length > 0) {
+      clearConversation();
+      setActiveTab("chat");
+      setPins(user ? getPins(user.tenant_id, user.id) : []);
+    }
+  }, [externalConversationId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load external conversation when sidebar selection changes
   useEffect(() => {
