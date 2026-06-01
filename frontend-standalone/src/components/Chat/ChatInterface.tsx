@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Box, Tab, Tabs, Typography } from "@mui/material";
+import { Alert, Box, IconButton, Tab, Tabs, Tooltip, Typography } from "@mui/material";
+import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
 import { tokens } from "@/theme/tokens";
 import { useAuth } from "@/hooks/useAuth";
 import { useChat } from "@/hooks/useChat";
@@ -12,6 +13,7 @@ import { AiPinnedList } from "./AiPinnedList";
 import { api } from "@/api/client";
 import { getPins, togglePin, unpinMessage } from "@/utils/pins";
 import type { PinnedMessage } from "@/utils/pins";
+import { exportConversation } from "@/utils/exportHtml";
 
 interface Props {
   externalConversationId?: string | null;
@@ -117,22 +119,30 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
       {/* Context bar */}
       {user && <ContextBar user={user} />}
 
-      {/* Tabs: Chat / Anclados */}
-      <Box sx={{ borderBottom: "1px solid", borderColor: "grey.200", px: 2 }}>
+      {/* Tabs: Chat / Anclados + Export button */}
+      <Box sx={{ borderBottom: "1px solid", borderColor: "grey.200", px: 2, display: "flex", alignItems: "center" }}>
         <Tabs
           value={activeTab}
           onChange={(_, v: "chat" | "pins") => setActiveTab(v)}
           sx={{
-            minHeight: 36,
+            flex: 1, minHeight: 36,
             "& .MuiTab-root": { minHeight: 36, fontSize: "0.8rem", py: 0, textTransform: "none" },
           }}
         >
-          <Tab value="chat"  label="Chat" />
-          <Tab
-            value="pins"
-            label={pins.length > 0 ? `Anclados (${pins.length})` : "Anclados"}
-          />
+          <Tab value="chat" label="Chat" />
+          <Tab value="pins" label={pins.length > 0 ? `Anclados (${pins.length})` : "Anclados"} />
         </Tabs>
+        {messages.length > 0 && activeTab === "chat" && (
+          <Tooltip title="Exportar conversación">
+            <IconButton
+              size="small"
+              onClick={() => exportConversation(messages, user?.tenant_id ?? 0)}
+              sx={{ color: "text.disabled", ml: 1 }}
+            >
+              <FileDownloadOutlinedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
       </Box>
 
       {/* Tab content */}
