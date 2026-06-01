@@ -207,16 +207,14 @@ async def get_monthly_spend_usd(tenant_id: int) -> float:
     if is_postgres(tenant_id):
         rows = await _execute_pg(
             """
-            SELECT COALESCE(SUM(tokens_used), 0) AS total_tokens
+            SELECT COALESCE(SUM(cost_usd), 0.0) AS total
             FROM audit.conversation_log
             WHERE tenant_id = ?
               AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
             """,
             (tenant_id,),
         )
-        total_tokens = int(rows[0]["total_tokens"]) if rows else 0
-        # $9 per 1M tokens — blended input/output estimate for claude-sonnet-4
-        return round(total_tokens * 9 / 1_000_000, 4)
+        return float(rows[0]["total"]) if rows else 0.0
     else:
         rows = await execute_query(
             """
