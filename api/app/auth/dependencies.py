@@ -154,6 +154,13 @@ async def get_current_user_dep(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuario no encontrado",
         )
+    # For PG-native users (integer IDs), get_user_by_id returns the internal
+    # auth.tenants.id (e.g. 1) as tenant_id — but all business tables
+    # (config, chat, audit) use platform_tenant_id (e.g. 24) which is what
+    # the JWT carries.  Override to keep them consistent.
+    jwt_tenant_id = claims.get("tenant_id")
+    if jwt_tenant_id is not None:
+        user.tenant_id = int(jwt_tenant_id)
     return user
 
 
