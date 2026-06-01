@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, date
+from typing import Any
 from uuid import UUID
 
 
@@ -42,7 +43,7 @@ class User:
 @dataclass
 class RefreshToken:
     id: UUID
-    user_id: UUID
+    user_id: Any      # UUID for SS users; str integer ("1") for PG-native users
     token_hash: str
     expires_at: datetime
     revoked_at: datetime | None

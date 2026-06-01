@@ -327,11 +327,59 @@ async def save_refresh_token_pg(
 
 
 async def revoke_refresh_token(token_hash: str) -> None:
+    # Try SQL Server first; if not found (admin tokens live in PG), try PG
     await execute_query(
         """UPDATE auth.refresh_tokens
            SET revoked_at = GETUTCDATE()
            WHERE token_hash = ? AND revoked_at IS NULL;""",
         (token_hash,),
+    )
+    # Also revoke in PostgreSQL (superadmin / PG-native users)
+    await _pg_execute(
+        "UPDATE auth.refresh_tokens SET revoked = TRUE "
+        "WHERE token_hash = %s AND revoked = FALSE",
+        (token_hash,),
+    )
+
+
+async def _get_valid_refresh_token_pg(token_hash: str) -> RefreshToken | None:
+    """Look up a valid refresh token in PostgreSQL (for PG-native users).
+
+    user_id is stored as the string representation of the integer PG id
+    so that get_user_by_id(str(token.user_id)) → _looks_like_int → PG lookup.
+    """
+    import asyncio as _asyncio
+    import psycopg2 as _pg
+    import psycopg2.extras as _pgx
+    from app.db.connections import _PG_CONN_PARAMS
+    from datetime import datetime as _dt
+
+    def _query() -> list:
+        conn = _pg.connect(**_PG_CONN_PARAMS)
+        try:
+            cur = conn.cursor(cursor_factory=_pgx.RealDictCursor)
+            cur.execute(
+                "SELECT * FROM auth.refresh_tokens "
+                "WHERE token_hash = %s AND revoked = FALSE AND expires_at > NOW()",
+                (token_hash,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    rows = await _asyncio.to_thread(_query)
+    if not rows:
+        return None
+    row = rows[0]
+    # user_id is stored as integer string ("1") so that:
+    # str(stored.user_id) → "1" → _looks_like_int → _get_user_by_id_pg
+    return RefreshToken(
+        id=UUID("00000000-0000-0000-0000-000000000000"),
+        user_id=str(row["user_id"]),          # "1", "2", ... ← key fix
+        token_hash=row["token_hash"],
+        expires_at=row["expires_at"],
+        revoked_at=None,
+        created_at=row.get("created_at", _dt.now()),
     )
 
 
@@ -343,6 +391,9 @@ async def get_valid_refresh_token(token_hash: str) -> RefreshToken | None:
              AND expires_at > GETUTCDATE();""",
         (token_hash,),
     )
+    if not rows:
+        # Not in SQL Server — try PostgreSQL (superadmin / PG-native users)
+        return await _get_valid_refresh_token_pg(token_hash)
     if not rows:
         return None
     row = rows[0]
@@ -365,3 +416,10 @@ async def revoke_all_user_refresh_tokens(user_id: str) -> None:
            WHERE user_id = ? AND revoked_at IS NULL;""",
         (user_id,),
     )
+    # Also revoke in PG (superadmin / PG-native users)
+    if _looks_like_int(user_id):
+        await _pg_execute(
+            "UPDATE auth.refresh_tokens SET revoked = TRUE "
+            "WHERE user_id = %s AND revoked = FALSE",
+            (int(user_id),),
+        )

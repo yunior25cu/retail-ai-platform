@@ -117,7 +117,11 @@ async def refresh(payload: RefreshRequest) -> TokenResponse:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail=_GENERIC_401)
 
-    tenant = await repo.get_tenant_by_id(user.tenant_id)
+    # Superadmin has tenant_id=0 (NULL in PG) — look up by slug 'admin'
+    if user.tenant_id == 0 and user.role == "superadmin":
+        tenant = await repo.get_tenant_by_slug("admin")
+    else:
+        tenant = await repo.get_tenant_by_id(user.tenant_id)
     if not tenant:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail=_GENERIC_401)
@@ -129,9 +133,14 @@ async def refresh(payload: RefreshRequest) -> TokenResponse:
     expires_at = datetime.now(timezone.utc) + timedelta(
         days=getattr(settings, "refresh_token_expire_days", 30)
     )
-    await repo.save_refresh_token(
-        str(user.id), hash_refresh_token(plain_refresh), expires_at
-    )
+    if repo._looks_like_int(str(user.id)):
+        await repo.save_refresh_token_pg(
+            str(user.id), hash_refresh_token(plain_refresh), expires_at
+        )
+    else:
+        await repo.save_refresh_token(
+            str(user.id), hash_refresh_token(plain_refresh), expires_at
+        )
     return token_resp
 
 
