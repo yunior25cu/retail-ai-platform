@@ -17,7 +17,14 @@ from fastapi import HTTPException, Request, status
 
 from app.config import settings
 
-VALID_ROLES = {"direccion", "marca", "tienda", "sku", "produccion"}
+VALID_ROLES = {
+    # retail vertical
+    "direccion", "marca", "tienda", "sku",
+    # produccion vertical
+    "produccion", "compras",
+    # admin roles (both verticals)
+    "admin_tenant", "superadmin", "super_admin",
+}
 
 
 @dataclass(frozen=True)

@@ -310,6 +310,7 @@ _SUGGESTIONS_TTL = 3600  # seconds
 # legitimate for that role. Without this, every role gets nearly identical
 # suggestions because the prompt only had the bare role name.
 _ROLE_INTENT: dict[str, str] = {
+    # ── retail vertical ──────────────────────────────────────────────────────
     "direccion":
         "gerente general que piensa en patrones sistémicos, "
         "causa raíz y decisiones de política para TODO el negocio, "
@@ -327,15 +328,33 @@ _ROLE_INTENT: dict[str, str] = {
         "analista que decide sobre UN producto específico: su "
         "descuento, su rotación, su cobertura, en qué tienda rota "
         "mejor. Preguntas puntuales sobre un SKU.",
+    # ── produccion vertical ──────────────────────────────────────────────────
     "produccion":
         "jefe de producción que planifica qué fabricar hoy y esta semana. "
         "Necesita saber qué productos están críticos (cobertura < 7 días), "
         "qué insumos faltan, cómo distribuir la carga entre reactores y "
         "cuántos litros producir. Preguntas operativas de fabricación.",
+    "compras":
+        "jefe de compras que gestiona proveedores, órdenes de compra y stock "
+        "de insumos. Necesita saber qué materias primas están críticas, "
+        "qué órdenes están pendientes y qué materiales deben reponerse "
+        "esta semana para no frenar la producción.",
+    # ── roles admin (ambos verticales) ──────────────────────────────────────
+    "admin_tenant":
+        "director o administrador del negocio que supervisa la operación completa. "
+        "Ve el panorama global: producción, compras, costos y rendimiento. "
+        "Preguntas estratégicas y de control de gestión con horizonte mensual.",
+    "superadmin":
+        "administrador de plataforma con visión global de todos los tenants. "
+        "Preguntas sobre rendimiento operacional y estado de la plataforma.",
+    "super_admin":
+        "administrador de plataforma con visión global de todos los tenants. "
+        "Preguntas sobre rendimiento operacional y estado de la plataforma.",
 }
 
 # Per-role fallback suggestions used when Claude fails or returns <3 lines.
 _FALLBACK_BY_ROLE: dict[str, list[str]] = {
+    # ── retail vertical ──────────────────────────────────────────────────────
     "direccion": [
         "¿Cómo venimos vs plan este mes?",
         "¿Cuál es la alerta de mayor impacto?",
@@ -356,10 +375,32 @@ _FALLBACK_BY_ROLE: dict[str, list[str]] = {
         "¿En qué tienda rota mejor este SKU?",
         "¿Qué descuento acelera su venta?",
     ],
+    # ── produccion vertical ──────────────────────────────────────────────────
     "produccion": [
         "¿Qué producimos hoy?",
         "¿Qué insumos están críticos?",
         "¿Cuántos lotes entran en el reactor grande?",
+    ],
+    "compras": [
+        "¿Qué insumos están bajo el punto de reorden?",
+        "¿Qué órdenes de compra están pendientes de entrega?",
+        "¿Qué materias primas frenarán la producción esta semana?",
+    ],
+    # ── roles admin ──────────────────────────────────────────────────────────
+    "admin_tenant": [
+        "¿Cómo está el rendimiento operacional este mes?",
+        "¿Qué cuellos de botella frenan la producción?",
+        "¿Cómo estamos vs el presupuesto de este mes?",
+    ],
+    "superadmin": [
+        "¿Cómo está el uso de la plataforma este mes?",
+        "¿Qué tenants tienen mayor consumo de tokens?",
+        "¿Cuál es el costo total de IA del mes?",
+    ],
+    "super_admin": [
+        "¿Cómo está el uso de la plataforma este mes?",
+        "¿Qué tenants tienen mayor consumo de tokens?",
+        "¿Cuál es el costo total de IA del mes?",
     ],
 }
 
