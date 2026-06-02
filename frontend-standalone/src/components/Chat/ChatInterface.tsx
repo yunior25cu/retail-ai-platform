@@ -18,6 +18,13 @@ import { exportConversation } from "@/utils/exportHtml";
 
 interface Props {
   externalConversationId?: string | null;
+  // Monotonic counter incremented by the parent on every "Nueva conversación"
+  // click. Lets us reset the chat unconditionally, even when
+  // externalConversationId did not change (e.g. it was already null because
+  // no sidebar entry was selected). React skips a re-run of the
+  // [externalConversationId] effect when the value is the same as before,
+  // which was the actual bug — the new-conv button silently no-op'd.
+  newConvSignal?: number;
   onConversationChange?: (id: string) => void;
   onSelectConversation?: (id: string) => void;
 }
@@ -47,7 +54,7 @@ function TypingIndicator() {
   );
 }
 
-export function ChatInterface({ externalConversationId, onConversationChange, onSelectConversation }: Props) {
+export function ChatInterface({ externalConversationId, newConvSignal, onConversationChange, onSelectConversation }: Props) {
   const { user } = useAuth();
   const {
     messages, conversationId, isLoading, error,
@@ -70,14 +77,18 @@ export function ChatInterface({ externalConversationId, onConversationChange, on
     if (user) setPins(getPins(user.tenant_id, user.id));
   }, [user]);
 
-  // "Nueva conversación" — externalConversationId goes null while messages exist
+  // "Nueva conversación" — fires every time the parent bumps newConvSignal.
+  // We intentionally do NOT condition on messages.length > 0: clicking the
+  // button always resets the working conv so the next POST creates a fresh
+  // audit.conversation row instead of appending to whatever was cached.
+  // The previous version listened on [externalConversationId] going null,
+  // which silently no-op'd when it was already null.
   useEffect(() => {
-    if (externalConversationId === null && messages.length > 0) {
-      clearConversation();
-      setActiveTab("chat");
-      setPins(user ? getPins(user.tenant_id, user.id) : []);
-    }
-  }, [externalConversationId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (newConvSignal === undefined || newConvSignal === 0) return;
+    clearConversation();
+    setActiveTab("chat");
+    setPins(user ? getPins(user.tenant_id, user.id) : []);
+  }, [newConvSignal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load external conversation when sidebar selection changes
   useEffect(() => {
