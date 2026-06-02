@@ -42,6 +42,7 @@ class UserResponse(BaseModel):
     role: str
     full_name: str | None
     tenant_id: int
+    tenant_name: str | None = None  # display name (e.g. "Prolimpio") for the context bar
     is_active: bool
     created_at: datetime
 

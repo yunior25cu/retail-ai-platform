@@ -136,6 +136,7 @@ export interface UserResponse {
   role: string;
   full_name: string | null;
   tenant_id: number;
+  tenant_name?: string | null;
   is_active: boolean;
   created_at: string;
 }

@@ -97,6 +97,47 @@ async def get_tenant_by_id(tenant_id: int) -> Tenant | None:
     return _row_to_tenant(rows[0]) if rows else None
 
 
+async def get_tenant_name_by_platform_id(platform_tenant_id: int) -> str | None:
+    """Display name for a tenant given the value that lives in JWT.tenant_id
+    (which is platform_tenant_id, not auth.tenants.id). Used by /me to
+    populate the context bar.
+
+    Looks in SQL Server first (where most tenants live) and falls back to
+    PostgreSQL (standalone tenants like 'admin'). Returns None if not found
+    — the frontend renders "Tenant N" as fallback.
+    """
+    rows = await execute_query(
+        "SELECT name FROM auth.tenants WHERE platform_tenant_id = ? AND is_active = 1;",
+        (platform_tenant_id,),
+    )
+    if rows:
+        return rows[0]["name"]
+
+    import asyncio as _asyncio
+    import psycopg2 as _pg
+    import psycopg2.extras as _pgx
+    from app.db.connections import _PG_CONN_PARAMS
+
+    def _query() -> list:
+        conn = _pg.connect(**_PG_CONN_PARAMS)
+        try:
+            cur = conn.cursor(cursor_factory=_pgx.RealDictCursor)
+            cur.execute(
+                "SELECT name FROM auth.tenants "
+                "WHERE platform_tenant_id = %s AND is_active = TRUE",
+                (platform_tenant_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    try:
+        pg_rows = await _asyncio.to_thread(_query)
+    except Exception:
+        return None
+    return pg_rows[0]["name"] if pg_rows else None
+
+
 async def get_superadmin_by_email(email: str) -> User | None:
     """Find a superadmin user by email in PostgreSQL (tenant_id IS NULL).
 
@@ -410,13 +451,15 @@ async def get_valid_refresh_token(token_hash: str) -> RefreshToken | None:
 
 
 async def revoke_all_user_refresh_tokens(user_id: str) -> None:
-    await execute_query(
-        """UPDATE auth.refresh_tokens
-           SET revoked_at = GETUTCDATE()
-           WHERE user_id = ? AND revoked_at IS NULL;""",
-        (user_id,),
-    )
-    # Also revoke in PG (superadmin / PG-native users)
+    # PG-native users (integer IDs) only have tokens in PostgreSQL — skip SQL Server
+    # to avoid UNIQUEIDENTIFIER cast error on user_id = "5".
+    if not _looks_like_int(user_id):
+        await execute_query(
+            """UPDATE auth.refresh_tokens
+               SET revoked_at = GETUTCDATE()
+               WHERE user_id = ? AND revoked_at IS NULL;""",
+            (user_id,),
+        )
     if _looks_like_int(user_id):
         await _pg_execute(
             "UPDATE auth.refresh_tokens SET revoked = TRUE "

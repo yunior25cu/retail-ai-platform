@@ -175,12 +175,20 @@ async def me(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Usuario no encontrado")
 
+    # The JWT carries platform_tenant_id (what /chat and the UI use); the
+    # User dataclass carries auth.users.tenant_id (the internal id). Look
+    # up the display name by the platform id so it works for both SS and
+    # PG tenants — fall back to None and let the UI render "Tenant N".
+    jwt_tenant_id = int(claims.get("tenant_id", user.tenant_id))
+    tenant_name = await repo.get_tenant_name_by_platform_id(jwt_tenant_id)
+
     return UserResponse(
         id=str(user.id),
         email=user.email,
         role=user.role,
         full_name=user.full_name,
-        tenant_id=user.tenant_id,
+        tenant_id=jwt_tenant_id,   # consistent with what the JWT and /chat use
+        tenant_name=tenant_name,
         is_active=user.is_active,
         created_at=user.created_at,
     )

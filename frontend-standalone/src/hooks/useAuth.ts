@@ -30,6 +30,7 @@ export function useAuth() {
           role: u.role,
           full_name: u.full_name,
           tenant_id: u.tenant_id,
+          tenant_name: u.tenant_name ?? null,
           vertical: state.vertical ?? "retail",
         };
         dispatch({ type: "SET_USER", payload: user });
@@ -62,6 +63,7 @@ export function useAuth() {
           role: me.role,
           full_name: me.full_name,
           tenant_id: me.tenant_id,
+          tenant_name: me.tenant_name ?? null,
           vertical: tokens.vertical,
         },
       });

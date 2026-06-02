@@ -18,6 +18,7 @@ export interface AuthUser {
   role: string;
   full_name: string | null;
   tenant_id: number;
+  tenant_name?: string | null;  // display name from /auth/me (e.g. "Prolimpio")
   vertical: string;
 }
 

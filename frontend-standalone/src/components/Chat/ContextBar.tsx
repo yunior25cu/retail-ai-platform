@@ -44,7 +44,9 @@ const chipSx = {
 export function ContextBar({ user }: Props) {
   const roleLabel = ROLE_LABELS[user.role] ?? user.role;
   const period    = getPeriodLabel(user.role);
-  const company   = `Tenant ${user.tenant_id}`;
+  // Prefer the human display name from /auth/me; fall back to "Tenant N"
+  // only if the backend didn't return one (older tokens, network issue).
+  const company = user.tenant_name ?? `Tenant ${user.tenant_id}`;
 
   return (
     <Box
