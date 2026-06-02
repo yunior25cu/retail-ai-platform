@@ -116,6 +116,50 @@ Checklist obligatorio para `tenant_config.py`:
 Si necesitás un helper que no existe, **creálo en `connections.py`** y
 documentalo acá — no inlinees el ternario `if is_postgres else`.
 
+### 2.4-bis Toda nueva tabla/columna que el código va a LEER necesita backfill
+
+> **Regla**: si tu PR introduce una tabla o columna que el código **empieza
+> a leer** (no solo a escribir), el PR DEBE incluir un script de migration
+> que pueble esa tabla/columna desde la fuente anterior. Sin backfill, los
+> registros pre-existentes generan 404, null o métricas incorrectas al
+> ser consultados.
+
+Diferencia clave:
+
+| Caso | Backfill obligatorio |
+|---|---|
+| Agregás columna que solo se escribe a futuro (`updated_by`) | **No** (lecturas tolerarán NULL) |
+| Agregás columna nullable que algún SELECT consume sin coerce | **Sí** o garantizá que el SELECT use COALESCE |
+| Agregás tabla nueva (`audit.conversation`) y un endpoint la consulta como gate | **Sí** — sin backfill, todo conv_id pre-existente devuelve 404 |
+| Renombrás tabla o cambiás de schema | **Sí** — migrate the data o un VIEW de compatibilidad |
+| Cambiás un campo de NULL a NOT NULL | **Sí** — populate los NULL antes del ALTER |
+
+Checklist para el PR:
+
+- [ ] El nuevo `CREATE TABLE` / `ALTER TABLE` está en
+      `db/migrations/NNN_*.sql` (PG) y/o `sql/gold/NNN_*.sql` (SS).
+- [ ] **HAY un script `db/migrations/NNN+1_backfill_*.sql`** que pobla
+      la nueva tabla/columna desde la fuente previa (otra tabla, log,
+      cálculo derivado).
+- [ ] El backfill es **idempotente** (`WHERE NOT EXISTS`,
+      `ON CONFLICT DO NOTHING`, etc.) — re-ejecutarlo no duplica filas
+      ni rompe nada.
+- [ ] El backfill se ejecutó en la base local antes del commit
+      (incluí el resultado del `RAISE NOTICE` o equivalente en el
+      mensaje del PR).
+- [ ] Si la fuente previa puede tener datos en LOS DOS motores (SS y PG)
+      pero solo migrás uno, documentalo: "backfill aplica solo a PG
+      porque la tabla anterior X solo existía en PG".
+
+Pregunta de oro antes de cerrar el PR:
+> "Si un cliente usa el sistema hoy con datos pre-existentes,
+> ¿alguna query nueva va a devolver 404 / null / cero cuando antes
+> daba un resultado válido?" Si la respuesta es "sí", falta backfill.
+
+Ver migration `007_backfill_audit_conversation.sql` como ejemplo: el
+commit `662202e` introdujo `audit.conversation` pero olvidó poblarla;
+los conv_ids viejos quedaron huérfanos y el primer follow-up rompió.
+
 ### 2.5 Tipos SQL — tabla de equivalencias
 
 | Concepto | SQL Server | PostgreSQL |
@@ -209,6 +253,7 @@ reglas de arriba. Eso convierte el AGENTS.md en una memoria viva.
 | Fecha | Bug | Causa | Cómo se detectó | Prevención que falló |
 |---|---|---|---|---|
 | 2026-05-30 | `tenant_config.py` agregó campo `vertical` al dataclass pero no al schema PG → tenant 24 nunca leía el valor | Sub-fase 6.7 no contempló dual-routing | Manual al testear Prolimpio | No existía AGENTS.md ni test de paridad — este archivo lo arregla |
+| 2026-06-01 | Conv_id pre-existente devolvía 404 al hacer follow-up. Commit `662202e` agregó `audit.conversation` y la usó como gate en `load_conversation`, pero no migró los conv_ids que ya estaban en `audit.conversation_log` | Migración de schema sin migración de datos | Usuario reportó "POST /chat → 404 conversation_not_found_for_tenant" en BD que tenía 4 mensajes en log para ese UUID | Backfill no era obligatorio. Migration `007_backfill_audit_conversation.sql` rellena los huérfanos. Regla nueva 2.4-bis exige backfill en todo PR que agregue tabla/columna que el código lee |
 
 ---
 
