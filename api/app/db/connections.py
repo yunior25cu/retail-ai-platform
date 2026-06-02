@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import Any
 
 import psycopg2
@@ -156,6 +157,75 @@ async def _execute_pg_write(sql: str, params: tuple | None = None) -> None:
 
 # ── Public routing function ───────────────────────────────────────────────────
 
+_SS_TO_PG_PATTERNS = [
+    # N'literal' -> 'literal'  (TSQL NVARCHAR literal prefix)
+    (re.compile(r"\bN'"), "'"),
+    # ISNULL(a, b) -> COALESCE(a, b)  (PG-compatible drop-in)
+    (re.compile(r"\bISNULL\(", re.IGNORECASE), "COALESCE("),
+    # CAST(x AS NVARCHAR(N))  -> CAST(x AS TEXT)
+    (re.compile(r"\bAS\s+NVARCHAR\s*\(\s*\d+\s*\)", re.IGNORECASE), "AS TEXT"),
+    # CAST(x AS NVARCHAR(MAX))  -> CAST(x AS TEXT)
+    (re.compile(r"\bAS\s+NVARCHAR\s*\(\s*MAX\s*\)", re.IGNORECASE), "AS TEXT"),
+    # CAST(x AS NVARCHAR)  -> CAST(x AS TEXT)
+    (re.compile(r"\bAS\s+NVARCHAR\b", re.IGNORECASE), "AS TEXT"),
+    # [level], [date], [delete] -> "level", "date", "delete"
+    # Only matches lowercase identifiers (table column names by convention)
+    (re.compile(r"\[([a-z_][a-z0-9_]*)\]"), r'"\1"'),
+    # GETDATE() -> NOW()  (rare; we usually use CURRENT_DATE)
+    (re.compile(r"\bGETDATE\s*\(\s*\)", re.IGNORECASE), "NOW()"),
+    # SYSUTCDATETIME() -> NOW() AT TIME ZONE 'UTC'
+    (re.compile(r"\bSYSUTCDATETIME\s*\(\s*\)", re.IGNORECASE), "(NOW() AT TIME ZONE 'UTC')"),
+]
+
+_TOP_PATTERN = re.compile(
+    r"^(\s*SELECT\s+)TOP\s*\(\s*\?\s*\)\s+",
+    re.IGNORECASE,
+)
+
+
+def _translate_ss_to_pg(
+    sql: str, params: tuple[Any, ...] | None, tenant_id: int
+) -> tuple[str, tuple[Any, ...]]:
+    """Adapt a SQL-Server-flavoured query to PostgreSQL for PG tenants.
+
+    Conservative transformer — only handles patterns actually used by
+    retail queries today. New ones go here on demand. Documented in
+    AGENTS.md §2.6 (idiom mapping).
+
+    Transformations:
+      - schema  ``gold.``       -> ``gold_tNN.`` (NN = tenant_id)
+      - ``ISNULL(``             -> ``COALESCE(``
+      - ``AS NVARCHAR(N|MAX)``  -> ``AS TEXT``
+      - ``[colname]``           -> ``"colname"`` (lowercase ids only)
+      - ``SYSUTCDATETIME()``    -> ``(NOW() AT TIME ZONE 'UTC')``
+      - ``GETDATE()``           -> ``NOW()``
+      - ``SELECT TOP (?) ...``  -> ``SELECT ... LIMIT ?`` (param moves
+                                    from first to last position)
+
+    Returns (sql_pg, params_pg). If the input already used PG syntax it
+    is left untouched (idempotent for unmodified patterns).
+    """
+    # Schema rewrite — must come first (the table identifier is part of
+    # subsequent replacements). Use the tenant-specific schema gold_tNN.
+    sql = sql.replace("gold.", f"gold_t{tenant_id}.")
+
+    for pattern, replacement in _SS_TO_PG_PATTERNS:
+        sql = pattern.sub(replacement, sql)
+
+    # TOP (?) is the trickiest: we strip it from the SELECT and append
+    # LIMIT %s, shuffling the placeholder from position 0 to the end of
+    # ``params``. Only fires when the query starts with SELECT TOP (?) —
+    # subqueries or CTEs with TOP would need their own pass (not used in
+    # retail queries today).
+    m = _TOP_PATTERN.match(sql)
+    if m and params is not None and len(params) >= 1:
+        sql = m.group(1) + sql[m.end():]
+        sql = sql.rstrip().rstrip(";") + " LIMIT %s"
+        params = params[1:] + (params[0],)
+
+    return sql, params or ()
+
+
 async def execute_query_tenant(
     sql: str,
     params: tuple[Any, ...] | None = None,
@@ -163,10 +233,15 @@ async def execute_query_tenant(
 ) -> list[dict[str, Any]]:
     """Execute a query on the correct database for tenant_id.
 
-    Production tools use this instead of execute_query().
-    Retail tools keep using execute_query() — no change.
+    For PG tenants, SQL-Server syntax is auto-translated by
+    ``_translate_ss_to_pg`` so retail queries written in T-SQL keep working.
+    The translator is conservative — it only handles patterns actually used
+    by ``app/db/queries.py``. New ones go in the patterns list on demand.
+
+    For SS tenants the SQL is passed through unchanged.
     """
     if is_postgres(tenant_id):
+        sql, params = _translate_ss_to_pg(sql, params, tenant_id)
         return await _execute_pg(sql, params)
     else:
         from app.db.connection import execute_query

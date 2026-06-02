@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.db.connection import execute_query
+from app.db.connections import execute_query_tenant
 
 # ----------------------------------------------------------------------------
 # Allowlists for dynamic SQL fragments. Adding a value here is the ONLY way
@@ -59,7 +60,7 @@ async def fetch_active_alerts(
         ORDER BY estimated_impact_usd DESC, alert_id;
     """
     params = (limit, tenant_id, level, level, severity, severity)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -84,7 +85,7 @@ async def fetch_store_dashboard(
         ORDER BY revenue DESC, store_id;
     """
     params = (tenant_id, store_id, store_id, week_id, week_id)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -109,7 +110,7 @@ async def fetch_brand_performance(
         ORDER BY revenue DESC, brand_id;
     """
     params = (tenant_id, brand_id, brand_id, week_id, week_id)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -155,7 +156,7 @@ async def fetch_sku_coverage_status(
         status, status,
         sku_id, sku_id,
     )
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -180,7 +181,7 @@ async def fetch_velocity_segmentation(
         ORDER BY units_8w DESC, sku_id;
     """
     params = (limit, tenant_id, segment, segment, brand_id, brand_id)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -209,7 +210,7 @@ async def fetch_action_recommendations(
         ORDER BY priority_rank;
     """
     params = (limit, tenant_id, scope, scope, severity, severity)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -248,7 +249,7 @@ async def fetch_tenant_weekly_totals(
         FROM gold.fact_sales_weekly
         WHERE tenant_id = ? AND iso_year_week = ?;
     """
-    rows = await execute_query(sql, (week_id, tenant_id, week_id))
+    rows = await execute_query_tenant(sql, (week_id, tenant_id, week_id), tenant_id)
     if not rows or rows[0]["rows_in_week"] == 0:
         return None
     return rows[0]
@@ -264,7 +265,7 @@ async def fetch_tenant_plan_totals(
         FROM gold.fact_sales_plan
         WHERE tenant_id = ? AND iso_year_week = ?;
     """
-    rows = await execute_query(sql, (tenant_id, week_id))
+    rows = await execute_query_tenant(sql, (tenant_id, week_id), tenant_id)
     return rows[0] if rows else None
 
 
@@ -283,7 +284,7 @@ async def fetch_tenant_distinct_tickets(
           AND d.[delete]       = 0
           AND dd.iso_year_week = ?;
     """
-    rows = await execute_query(sql, (tenant_id, week_id))
+    rows = await execute_query_tenant(sql, (tenant_id, week_id), tenant_id)
     return int(rows[0]["tickets"]) if rows else 0
 
 
@@ -299,7 +300,7 @@ async def fetch_sku_master(tenant_id: int, sku_id: int) -> dict[str, Any] | None
         FROM gold.dim_sku
         WHERE tenant_id = ? AND sku_id = ? AND is_active = 1;
     """
-    rows = await execute_query(sql, (tenant_id, sku_id))
+    rows = await execute_query_tenant(sql, (tenant_id, sku_id), tenant_id)
     return rows[0] if rows else None
 
 
@@ -330,7 +331,7 @@ async def fetch_sku_sales_8w(
         ORDER BY f.iso_year_week DESC;
     """
     params = (tenant_id, sku_id, store_id, store_id, tenant_id, sku_id, store_id, store_id)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 async def fetch_sku_stock_current(
@@ -354,7 +355,7 @@ async def fetch_sku_stock_current(
         ORDER BY s.store_id;
     """
     params = (tenant_id, tenant_id, sku_id, store_id, store_id)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -395,7 +396,7 @@ async def fetch_compare_periods(
             WHERE tenant_id = ? AND iso_year_week IN (?, ?);
         """
         params = (period_a, period_b, tenant_id, period_a, period_b)
-        return await execute_query(sql, params)
+        return await execute_query_tenant(sql, params, tenant_id)
 
     if scope == "brand":
         sql = f"""
@@ -411,7 +412,7 @@ async def fetch_compare_periods(
             GROUP BY ds.brand_id;
         """
         params = (period_a, period_b, tenant_id, period_a, period_b)
-        return await execute_query(sql, params)
+        return await execute_query_tenant(sql, params, tenant_id)
 
     # scope == "store"
     sql = f"""
@@ -427,7 +428,7 @@ async def fetch_compare_periods(
         GROUP BY f.store_id;
     """
     params = (period_a, period_b, tenant_id, period_a, period_b)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -482,7 +483,7 @@ async def fetch_monthly_totals(
         scope_brand_id, scope_brand_id,
         scope_store_id, scope_store_id,
     )
-    rows = await execute_query(sql, params)
+    rows = await execute_query_tenant(sql, params, tenant_id)
     return rows[0] if rows else None
 
 
@@ -505,7 +506,7 @@ async def fetch_monthly_brand_performance(
         ORDER BY year_month_iso DESC, revenue DESC, brand_id;
     """
     params = (tenant_id, brand_id, brand_id, year_month, year_month)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 async def fetch_monthly_store_dashboard(
@@ -528,7 +529,7 @@ async def fetch_monthly_store_dashboard(
         ORDER BY year_month_iso DESC, revenue DESC, store_id;
     """
     params = (tenant_id, store_id, store_id, year_month, year_month)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 async def fetch_compare_periods_monthly(
@@ -558,7 +559,7 @@ async def fetch_compare_periods_monthly(
             WHERE tenant_id = ? AND year_month_iso IN (?, ?);
         """
         params = (period_a, period_b, tenant_id, period_a, period_b)
-        return await execute_query(sql, params)
+        return await execute_query_tenant(sql, params, tenant_id)
 
     if scope == "brand":
         sql = f"""
@@ -575,7 +576,7 @@ async def fetch_compare_periods_monthly(
             GROUP BY m.brand_id;
         """
         params = (period_a, period_b, tenant_id, period_a, period_b)
-        return await execute_query(sql, params)
+        return await execute_query_tenant(sql, params, tenant_id)
 
     # scope == "store"
     sql = f"""
@@ -591,7 +592,7 @@ async def fetch_compare_periods_monthly(
         GROUP BY m.store_id;
     """
     params = (period_a, period_b, tenant_id, period_a, period_b)
-    return await execute_query(sql, params)
+    return await execute_query_tenant(sql, params, tenant_id)
 
 
 # ----------------------------------------------------------------------------
@@ -607,7 +608,7 @@ async def fetch_latest_week(
         WHERE tenant_id = ?
           AND (? IS NULL OR store_id = ?);
     """
-    rows = await execute_query(sql, (tenant_id, store_id, store_id))
+    rows = await execute_query_tenant(sql, (tenant_id, store_id, store_id), tenant_id)
     return rows[0]["w"] if rows and rows[0]["w"] else None
 
 
