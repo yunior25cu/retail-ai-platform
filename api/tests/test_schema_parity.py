@@ -43,6 +43,17 @@ import pytest
 #   (``cost_usd`` vs ``estimated_cost_usd``). DO NOT add to this list.
 DUAL_ROUTED_TABLES = [
     ("api_audit", "ai_tenant_config", "config", "tenant_config"),
+    # Tenant 23 retail (DEMO RETAIL CO) — migrado de gold.* a gold_t23.*
+    # en 008/009/010. Schemas deben mantener paridad mientras el codigo
+    # consuma las mismas vistas. Si se agrega una columna a SS hay que
+    # agregarla tambien a gold_t23 (regla §2.4-bis).
+    ("gold", "dim_sku",             "gold_t23", "dim_sku"),
+    ("gold", "dim_store",           "gold_t23", "dim_store"),
+    ("gold", "dim_category",        "gold_t23", "dim_category"),
+    ("gold", "dim_business_rules",  "gold_t23", "dim_business_rules"),
+    ("gold", "fact_sales_weekly",   "gold_t23", "fact_sales_weekly"),
+    ("gold", "fact_stock_weekly",   "gold_t23", "fact_stock_weekly"),
+    ("gold", "fact_sales_plan",     "gold_t23", "fact_sales_plan"),
 ]
 
 
@@ -110,6 +121,17 @@ ACCEPTED_DIVERGENCE: dict[tuple[str, str, str, str], dict[str, set[str]]] = {
     ("api_audit", "ai_tenant_config", "config", "tenant_config"): {
         "ss_only": {"id", "updated_by"},
         "pg_only": {"id"},
+    },
+    # block_AB en SS / block_ab en PG (PG normaliza a lowercase salvo
+    # con double-quotes; usamos lowercase por convencion).
+    # ETL audit cols (etl_loaded_at/batch_id/source_hash) y is_active
+    # estan en SS pero se omitieron en PG: el tenant 23 unico en PG no
+    # tiene stores inactivas ni necesita audit ETL (no hay refresh procs
+    # en PG, los datos se cargan via migration manual).
+    ("gold", "dim_store", "gold_t23", "dim_store"): {
+        "ss_only": {"block_AB", "etl_loaded_at", "etl_batch_id",
+                    "etl_source_hash", "is_active"},
+        "pg_only": {"block_ab"},
     },
 }
 

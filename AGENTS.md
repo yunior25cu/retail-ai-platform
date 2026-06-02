@@ -69,11 +69,29 @@ Pares dual-routed schema-equivalentes (deben tener las MISMAS columnas):
 
 | SQL Server | PostgreSQL | Definido en | Validado por |
 |---|---|---|---|
-| `api_audit.ai_tenant_config` | `config.tenant_config` | `sql/gold/13_tenant_config.sql` + `db/migrations/001_create_schemas.sql` | `test_schema_parity.py` |
-| `gold.dim_reactor` | `gold_t24.dim_reactor` | `sql/connectors/macrosoft/07_prolimpio_production_schema.sql` + `db/migrations/001_create_schemas.sql` | (agregar al test) |
-| `gold.fact_production_orders` | `gold_t24.fact_production_orders` | idem | (agregar al test) |
-| `gold.fact_component_stock` | `gold_t24.fact_component_stock` | idem | (agregar al test) |
-| (otras `gold.*` dim/fact) | (otras `gold_t24.*`) | idem | (agregar al test) |
+| `api_audit.ai_tenant_config` | `config.tenant_config` | `sql/gold/13_tenant_config.sql` + `db/migrations/001_create_schemas.sql` | `test_schema_parity.py` ✓ |
+| `gold.dim_sku` (tenant 23) | `gold_t23.dim_sku` | `db/migrations/008_create_retail_schemas.sql` | `test_schema_parity.py` ✓ |
+| `gold.dim_store` (tenant 23) | `gold_t23.dim_store` | idem | ✓ |
+| `gold.dim_category` (tenant 23) | `gold_t23.dim_category` | idem | ✓ |
+| `gold.dim_business_rules` (tenant 23) | `gold_t23.dim_business_rules` | idem | ✓ |
+| `gold.fact_sales_weekly` (tenant 23) | `gold_t23.fact_sales_weekly` | idem | ✓ |
+| `gold.fact_stock_weekly` (tenant 23) | `gold_t23.fact_stock_weekly` | idem | ✓ |
+| `gold.fact_sales_plan` (tenant 23) | `gold_t23.fact_sales_plan` | idem | ✓ |
+| `gold.dim_reactor` (tenant 24) | `gold_t24.dim_reactor` | `sql/connectors/macrosoft/07_prolimpio_production_schema.sql` + `db/migrations/001_create_schemas.sql` | (agregar al test) |
+| `gold.fact_production_orders` (tenant 24) | `gold_t24.fact_production_orders` | idem | (agregar al test) |
+| `gold.fact_component_stock` (tenant 24) | `gold_t24.fact_component_stock` | idem | (agregar al test) |
+| (otras `gold.*` dim/fact) | (otras `gold_t<N>.*`) | idem | (agregar al test) |
+
+**Cuando un tenant retail se migra de SS a PG** (como tenant 23):
+1. Crear `gold_t<N>.*` con las 8 tablas (`008_create_retail_schemas.sql`).
+2. Portar las 9 vistas analíticas (`009_create_retail_views.sql`).
+3. Ejecutar `010_migrate_data_t<N>.py` (DELETE+INSERT idempotente).
+4. Refactor de `queries.py` ya cubre dual-routing via `execute_query_tenant`
+   + `_translate_ss_to_pg` (no rehacer).
+5. Sembrar `auth.tenants` con `platform_tenant_id=<N>` + `config.tenant_config`
+   + usuarios (`011_seed_*_admin.py`).
+6. Limpiar SS: `DELETE FROM gold.* WHERE tenant_id=<N>` (`012_cleanup_*.sql`).
+7. Agregar los pares al `DUAL_ROUTED_TABLES` del parity test.
 
 **Pares dual-routed estructuralmente distintos** (no validados por
 paridad — la divergencia es por diseño):
@@ -254,6 +272,7 @@ reglas de arriba. Eso convierte el AGENTS.md en una memoria viva.
 |---|---|---|---|---|
 | 2026-05-30 | `tenant_config.py` agregó campo `vertical` al dataclass pero no al schema PG → tenant 24 nunca leía el valor | Sub-fase 6.7 no contempló dual-routing | Manual al testear Prolimpio | No existía AGENTS.md ni test de paridad — este archivo lo arregla |
 | 2026-06-01 | Conv_id pre-existente devolvía 404 al hacer follow-up. Commit `662202e` agregó `audit.conversation` y la usó como gate en `load_conversation`, pero no migró los conv_ids que ya estaban en `audit.conversation_log` | Migración de schema sin migración de datos | Usuario reportó "POST /chat → 404 conversation_not_found_for_tenant" en BD que tenía 4 mensajes en log para ese UUID | Backfill no era obligatorio. Migration `007_backfill_audit_conversation.sql` rellena los huérfanos. Regla nueva 2.4-bis exige backfill en todo PR que agregue tabla/columna que el código lee |
+| 2026-06-01 | Tenant 23 (Demo Retail) migrado de SS a PG. queries.py estaba hardcodeado a `FROM gold.*` (sintaxis TSQL) — sin dual-routing iba a romper apenas hubiera un tenant retail en PG | Capa de datos no preparada para dual-DB; tools de retail eran SS-only | Detectado en el forense del plan de migración (no llegó a producción) | Transformer `_translate_ss_to_pg` en `connections.py` adapta runtime; `queries.py` ahora usa `execute_query_tenant`. Patrón documentado en §2.6 y 7 pares nuevos agregados al parity test |
 
 ---
 
