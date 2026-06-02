@@ -793,3 +793,201 @@ async def get_platform_metrics(
         top_tool_count=top_tool_count,
         by_tenant=by_tenant_rows,
     )
+
+
+# ---------------------------------------------------------------------------
+# /admin/logs — cross-tenant audit trail viewer (super-admin only)
+#
+# Unifies rows from both engines into a single timeline:
+#   - PG: audit.conversation_log filtered to role='assistant'
+#         (one row per chat turn; user_question is in a separate row).
+#   - SS: api_audit.ai_audit_log (one row per chat with user_question in
+#         the same row).
+#
+# Each unified row carries enough info for an admin to triage: when,
+# which tenant, who, what role, status, tokens, cost, plus a short
+# preview text (user question if available, otherwise the assistant
+# response truncated).
+#
+# Pagination: cap to limit_per_engine each side, merge, sort by
+# timestamp DESC, slice. Acceptable for the current scale (~hundreds
+# of rows / month / tenant). When that grows we add a unified materialised
+# view; not now.
+# ---------------------------------------------------------------------------
+
+_LOG_PREVIEW_CHARS = 160
+_LOG_DEFAULT_LIMIT = 50
+_LOG_MAX_LIMIT = 200
+# Per-engine cap to keep memory + sort bounded — adjusted upwards if a real
+# log spans many tenants and we miss recent activity from the SS side.
+_LOG_PER_ENGINE_CAP = 500
+
+
+def _truncate(text: str | None, n: int = _LOG_PREVIEW_CHARS) -> str:
+    if not text:
+        return ""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= n else flat[:n] + "…"
+
+
+def _fetch_logs_pg(tenant_id: int | None, status_filter: str | None) -> list[dict[str, Any]]:
+    """One row per chat turn (assistant rows). user_question is fetched
+    from the user row at sequence-1 (same conversation) — but PG also has
+    audit.conversation_message for that. For the admin viewer we settle
+    for the assistant message_text as preview (the response) — cheaper
+    and good enough to triage."""
+    conn = _pg()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        clauses = ["cl.role = 'assistant'"]
+        params: list[Any] = []
+        if tenant_id is not None:
+            clauses.append("cl.tenant_id = %s")
+            params.append(tenant_id)
+        if status_filter:
+            clauses.append("cl.message_type = %s")
+            params.append(status_filter)
+        where_sql = " AND ".join(clauses)
+        params.append(_LOG_PER_ENGINE_CAP)
+        cur.execute(
+            f"""SELECT cl.created_at,
+                       cl.tenant_id,
+                       t.name AS tenant_name,
+                       cl.user_id,
+                       cl.conversation_id,
+                       cl.message_type AS status,
+                       COALESCE(cl.tokens_input, 0) + COALESCE(cl.tokens_output, 0) AS tokens,
+                       COALESCE(cl.cost_usd, 0) AS cost_usd,
+                       cl.message_text AS preview
+                FROM audit.conversation_log cl
+                LEFT JOIN auth.tenants t
+                       ON t.platform_tenant_id = cl.tenant_id
+                WHERE {where_sql}
+                ORDER BY cl.created_at DESC
+                LIMIT %s""",
+            tuple(params),
+        )
+        return [
+            {
+                "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
+                "tenant_id": int(r["tenant_id"]),
+                "tenant_name": r["tenant_name"],
+                "user_id": str(r["user_id"]) if r["user_id"] is not None else "",
+                "user_role": "",  # not stored on PG side
+                "conversation_id": r["conversation_id"],
+                "status": r["status"],
+                "tokens": int(r["tokens"] or 0),
+                "cost_usd": float(r["cost_usd"] or 0),
+                "preview": _truncate(r["preview"]),
+                "source": "pg",
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def _fetch_logs_ss(tenant_id: int | None, status_filter: str | None) -> list[dict[str, Any]]:
+    try:
+        from app.db.connection import _execute_sync
+    except Exception:
+        return []
+    clauses: list[str] = []
+    params: list[Any] = [_LOG_PER_ENGINE_CAP]  # TOP (?)
+    if tenant_id is not None:
+        clauses.append("tenant_id = ?")
+        params.append(tenant_id)
+    if status_filter:
+        clauses.append("status = ?")
+        params.append(status_filter)
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    try:
+        rows = _execute_sync(
+            f"""SELECT TOP (?)
+                       timestamp_utc, tenant_id, user_id, user_role,
+                       conversation_id, status,
+                       ISNULL(tokens_input, 0) + ISNULL(tokens_output, 0) AS tokens,
+                       ISNULL(cost_usd, 0) AS cost_usd,
+                       user_question AS preview
+                FROM api_audit.ai_audit_log
+                {where_sql}
+                ORDER BY timestamp_utc DESC;""",
+            tuple(params),
+        )
+    except Exception:
+        return []
+
+    # Tenant name lookup in one shot (SS auth.tenants)
+    tenant_ids = {int(r["tenant_id"]) for r in rows}
+    name_map = _resolve_tenant_names_ss(tenant_ids) if tenant_ids else {}
+
+    return [
+        {
+            "timestamp": (
+                r["timestamp_utc"].isoformat()
+                if hasattr(r["timestamp_utc"], "isoformat")
+                else str(r["timestamp_utc"])
+            ),
+            "tenant_id": int(r["tenant_id"]),
+            "tenant_name": name_map.get(int(r["tenant_id"])),
+            "user_id": str(r["user_id"]) if r["user_id"] is not None else "",
+            "user_role": r.get("user_role") or "",
+            "conversation_id": str(r["conversation_id"]) if r["conversation_id"] else None,
+            "status": r["status"],
+            "tokens": int(r["tokens"] or 0),
+            "cost_usd": float(r["cost_usd"] or 0),
+            "preview": _truncate(r["preview"]),
+            "source": "ss",
+        }
+        for r in rows
+    ]
+
+
+class LogRow(BaseModel):
+    timestamp: str | None
+    tenant_id: int
+    tenant_name: str | None
+    user_id: str
+    user_role: str
+    conversation_id: str | None
+    status: str
+    tokens: int
+    cost_usd: float
+    preview: str
+    source: str  # "pg" | "ss"
+
+
+class LogsResponse(BaseModel):
+    total: int
+    rows: list[LogRow]
+
+
+@router.get(
+    "/logs",
+    response_model=LogsResponse,
+    summary="Cross-tenant chat audit logs (super-admin only)",
+)
+async def get_logs(
+    admin=Depends(_superadmin),
+    tenant_id: int | None = None,
+    status_filter: str | None = None,
+    limit: int = _LOG_DEFAULT_LIMIT,
+    offset: int = 0,
+) -> LogsResponse:
+    # Sanitize paging
+    limit = max(1, min(_LOG_MAX_LIMIT, limit))
+    offset = max(0, offset)
+    # Normalize status: accept SUCCESS / ERROR / PARTIAL / None
+    status_filter = (status_filter or "").upper().strip() or None
+    if status_filter and status_filter not in ("SUCCESS", "ERROR", "PARTIAL"):
+        raise HTTPException(400, "status_filter must be SUCCESS, ERROR or PARTIAL")
+
+    pg_rows = _fetch_logs_pg(tenant_id, status_filter)
+    ss_rows = _fetch_logs_ss(tenant_id, status_filter)
+    combined = pg_rows + ss_rows
+    # Sort DESC by timestamp string (ISO 8601 sorts lexicographically)
+    combined.sort(key=lambda r: r["timestamp"] or "", reverse=True)
+
+    total = len(combined)
+    page = combined[offset : offset + limit]
+    return LogsResponse(total=total, rows=[LogRow(**r) for r in page])

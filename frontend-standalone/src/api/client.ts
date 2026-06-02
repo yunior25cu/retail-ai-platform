@@ -318,7 +318,36 @@ export const api = {
 
   adminGetPlatformMetrics: () =>
     http.get<PlatformMetricsResponse>("/api/v1/admin/platform_metrics").then((r) => r.data),
+
+  adminGetLogs: (params: {
+    tenant_id?: number;
+    status_filter?: "SUCCESS" | "ERROR" | "PARTIAL";
+    limit?: number;
+    offset?: number;
+  } = {}) =>
+    http
+      .get<LogsResponse>("/api/v1/admin/logs", { params })
+      .then((r) => r.data),
 };
+
+export interface LogRow {
+  timestamp: string | null;
+  tenant_id: number;
+  tenant_name: string | null;
+  user_id: string;
+  user_role: string;
+  conversation_id: string | null;
+  status: string;
+  tokens: number;
+  cost_usd: number;
+  preview: string;
+  source: "pg" | "ss";
+}
+
+export interface LogsResponse {
+  total: number;
+  rows: LogRow[];
+}
 
 export interface PlatformTenantRow {
   tenant_id: number;
