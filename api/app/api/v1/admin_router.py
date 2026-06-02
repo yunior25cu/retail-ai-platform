@@ -580,3 +580,216 @@ async def get_audit(
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# /admin/platform_metrics
+#
+# Cross-tenant AI usage for the AdminPlatformMetrics page.
+# Aggregates current-month chats from BOTH engines:
+#   - PG: audit.conversation_log (1 row per assistant message = 1 turn)
+#   - SS: api_audit.ai_audit_log  (1 row per chat with status=SUCCESS)
+# Joins with auth.tenants on platform_tenant_id for display names.
+# Super-admin only. Same JSON-tool-parser as /internal/metrics.
+# ---------------------------------------------------------------------------
+
+from collections import Counter
+from datetime import datetime, timezone
+
+
+def _current_month_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _aggregate_pg_metrics() -> dict[str, Any]:
+    conn = _pg()
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """SELECT tenant_id,
+                      COUNT(*) AS chats,
+                      COALESCE(SUM(cost_usd), 0) AS cost_usd
+               FROM audit.conversation_log
+               WHERE role = 'assistant'
+                 AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
+               GROUP BY tenant_id""",
+        )
+        per_tenant = [dict(r) for r in cur.fetchall()]
+        cur.execute(
+            """SELECT tools_used FROM audit.conversation_log
+               WHERE role = 'assistant'
+                 AND tools_used IS NOT NULL
+                 AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())""",
+        )
+        tool_rows = [r["tools_used"] for r in cur.fetchall()]
+        return {"per_tenant": per_tenant, "tool_rows": tool_rows}
+    finally:
+        conn.close()
+
+
+def _aggregate_ss_metrics() -> dict[str, Any]:
+    try:
+        from app.db.connection import _execute_sync
+    except Exception:
+        return {"per_tenant": [], "tool_rows": []}
+    try:
+        per_tenant_rows = _execute_sync(
+            """SELECT tenant_id,
+                      COUNT(*) AS chats,
+                      ISNULL(SUM(CAST(cost_usd AS FLOAT)), 0) AS cost_usd
+               FROM api_audit.ai_audit_log
+               WHERE timestamp_utc >= DATEFROMPARTS(
+                       YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1)
+                 AND timestamp_utc <  DATEADD(MONTH, 1, DATEFROMPARTS(
+                       YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1))
+                 AND status = 'SUCCESS'
+               GROUP BY tenant_id;""",
+            None,
+        )
+        tool_rows_raw = _execute_sync(
+            """SELECT tools_invoked FROM api_audit.ai_audit_log
+               WHERE timestamp_utc >= DATEFROMPARTS(
+                       YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1)
+                 AND timestamp_utc <  DATEADD(MONTH, 1, DATEFROMPARTS(
+                       YEAR(SYSUTCDATETIME()), MONTH(SYSUTCDATETIME()), 1))
+                 AND status = 'SUCCESS'
+                 AND tools_invoked IS NOT NULL;""",
+            None,
+        )
+    except Exception:
+        return {"per_tenant": [], "tool_rows": []}
+    return {
+        "per_tenant": [
+            {"tenant_id": int(r["tenant_id"]),
+             "chats": int(r["chats"]),
+             "cost_usd": float(r["cost_usd"] or 0)}
+            for r in per_tenant_rows
+        ],
+        "tool_rows": [
+            r["tools_invoked"] for r in tool_rows_raw if r.get("tools_invoked")
+        ],
+    }
+
+
+def _top_tool_from_rows(rows: list[str]) -> tuple[str, int]:
+    counter: Counter[str] = Counter()
+    for raw in rows:
+        try:
+            tools = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(tools, list):
+            continue
+        for entry in tools:
+            if isinstance(entry, str):
+                counter[entry] += 1
+            elif isinstance(entry, dict):
+                name = entry.get("name") or entry.get("tool")
+                if isinstance(name, str):
+                    counter[name] += 1
+    if not counter:
+        return "", 0
+    return counter.most_common(1)[0]
+
+
+def _resolve_tenant_names_pg(cur, platform_ids: set[int]) -> dict[int, str]:
+    if not platform_ids:
+        return {}
+    cur.execute(
+        "SELECT platform_tenant_id, name FROM auth.tenants "
+        "WHERE platform_tenant_id = ANY(%s)",
+        (list(platform_ids),),
+    )
+    return {r["platform_tenant_id"]: r["name"] for r in cur.fetchall()
+            if r["platform_tenant_id"] is not None}
+
+
+def _resolve_tenant_names_ss(platform_ids: set[int]) -> dict[int, str]:
+    if not platform_ids:
+        return {}
+    try:
+        from app.db.connection import _execute_sync
+        placeholders = ", ".join(["?"] * len(platform_ids))
+        rows = _execute_sync(
+            f"SELECT platform_tenant_id, name FROM auth.tenants "
+            f"WHERE platform_tenant_id IN ({placeholders})",
+            tuple(platform_ids),
+        )
+        return {r["platform_tenant_id"]: r["name"] for r in rows
+                if r.get("platform_tenant_id") is not None}
+    except Exception:
+        return {}
+
+
+class PlatformTenantRow(BaseModel):
+    tenant_id: int
+    tenant_name: str
+    chats: int
+    cost_usd: float
+
+
+class PlatformMetricsResponse(BaseModel):
+    period: str = Field(description="ISO month YYYY-MM (UTC)")
+    total_chats: int
+    total_cost_usd: float
+    active_tenants: int
+    top_tool: str
+    top_tool_count: int
+    by_tenant: list[PlatformTenantRow]
+
+
+@router.get(
+    "/platform_metrics",
+    response_model=PlatformMetricsResponse,
+    summary="Cross-tenant AI Assistant usage (super-admin only)",
+)
+async def get_platform_metrics(
+    admin=Depends(_superadmin),
+) -> PlatformMetricsResponse:
+    pg_data = _aggregate_pg_metrics()
+    ss_data = _aggregate_ss_metrics()
+
+    merged: dict[int, dict[str, Any]] = {}
+    for r in pg_data["per_tenant"] + ss_data["per_tenant"]:
+        tid = int(r["tenant_id"])
+        bucket = merged.setdefault(tid, {"chats": 0, "cost_usd": 0.0})
+        bucket["chats"] += int(r["chats"])
+        bucket["cost_usd"] += float(r["cost_usd"] or 0)
+
+    pg_conn = _pg()
+    try:
+        cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        name_map_pg = _resolve_tenant_names_pg(cur, set(merged.keys()))
+    finally:
+        pg_conn.close()
+    missing = {tid for tid in merged if tid not in name_map_pg}
+    name_map_ss = _resolve_tenant_names_ss(missing)
+    name_map = {**name_map_ss, **name_map_pg}
+
+    by_tenant_rows = sorted(
+        (
+            PlatformTenantRow(
+                tenant_id=tid,
+                tenant_name=name_map.get(tid, f"Tenant {tid}"),
+                chats=int(data["chats"]),
+                cost_usd=round(float(data["cost_usd"]), 4),
+            )
+            for tid, data in merged.items()
+        ),
+        key=lambda r: r.chats,
+        reverse=True,
+    )
+
+    top_tool_name, top_tool_count = _top_tool_from_rows(
+        pg_data["tool_rows"] + ss_data["tool_rows"]
+    )
+
+    return PlatformMetricsResponse(
+        period=_current_month_iso(),
+        total_chats=sum(b["chats"] for b in merged.values()),
+        total_cost_usd=round(sum(b["cost_usd"] for b in merged.values()), 4),
+        active_tenants=len(merged),
+        top_tool=top_tool_name,
+        top_tool_count=top_tool_count,
+        by_tenant=by_tenant_rows,
+    )

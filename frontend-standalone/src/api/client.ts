@@ -315,4 +315,24 @@ export const api = {
 
   adminGetVerticals: () =>
     http.get<VerticalOut[]>("/api/v1/admin/verticals").then((r) => r.data),
+
+  adminGetPlatformMetrics: () =>
+    http.get<PlatformMetricsResponse>("/api/v1/admin/platform_metrics").then((r) => r.data),
 };
+
+export interface PlatformTenantRow {
+  tenant_id: number;
+  tenant_name: string;
+  chats: number;
+  cost_usd: number;
+}
+
+export interface PlatformMetricsResponse {
+  period: string;
+  total_chats: number;
+  total_cost_usd: number;
+  active_tenants: number;
+  top_tool: string;
+  top_tool_count: number;
+  by_tenant: PlatformTenantRow[];
+}
