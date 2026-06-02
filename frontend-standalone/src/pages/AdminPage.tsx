@@ -307,8 +307,24 @@ function VerticalesTab() {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export function AdminPage() {
-  const [tab, setTab] = useState(0);
+// Tab slug → index. Used by the route /admin/:tabSlug so the sidebar can
+// deep-link directly to a section ("Tenants", "Usuarios", "Verticales")
+// without restructuring AdminPage into separate page components.
+const TAB_INDEX: Record<string, number> = {
+  tenants:    0,
+  users:      1,
+  usuarios:   1,
+  verticals:  2,
+  verticales: 2,
+};
+
+interface AdminPageProps {
+  /** Initial tab from the route. Defaults to "tenants". */
+  initialTab?: keyof typeof TAB_INDEX;
+}
+
+export function AdminPage({ initialTab = "tenants" }: AdminPageProps) {
+  const [tab, setTab] = useState<number>(TAB_INDEX[initialTab] ?? 0);
   return (
     <Box sx={{ maxWidth: 960, mx: "auto", px: 3, py: 4 }}>
       <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 3 }}>
