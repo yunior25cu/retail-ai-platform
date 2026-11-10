@@ -49,8 +49,9 @@ from app.db.tenant_config import (
     update_tenant_config,
 )
 from app.llm.claude_client import get_client
-from app.llm.orchestrator import run_conversation
+from app.llm.orchestrator import MAX_ITERATIONS, run_conversation
 from app.llm.prompts import select_prompt
+from app.mcp_client import open_balaxys_mcp
 from app.security.rate_limiter import RateLimitExceeded, limiter
 from app.security.sanitizer import Sanitizer
 
@@ -74,6 +75,14 @@ class InternalChatRequest(BaseModel):
     )
 
 
+class ChatCard(BaseModel):
+    """Tarjeta para el drawer del ERP: ``data`` es el structuredContent de la tool."""
+
+    tool: str = Field(description="Nombre de la tool MCP de Balaxys que la produjo.")
+    title: str | None = Field(default=None, description="Titulo de la tarjeta.")
+    data: dict[str, Any] = Field(description="structuredContent intacto (incluye confirmar_con).")
+
+
 class InternalChatResponse(BaseModel):
     response: str = Field(description="Claude's answer in markdown.")
     conversation_id: str = Field(description="Pass back on the next turn.")
@@ -82,6 +91,13 @@ class InternalChatResponse(BaseModel):
     tokens_input: int
     tokens_output: int
     duration_ms: int
+    cards: list[ChatCard] = Field(
+        default_factory=list,
+        description=(
+            "Tarjetas de datos/accion con resultados de tools MCP de Balaxys ERP. "
+            "Solo cuando el ERP envio X-Balaxys-Mcp-Token."
+        ),
+    )
 
 
 @router.post(
@@ -167,15 +183,24 @@ async def internal_chat(
     sanitizer = Sanitizer()
 
     try:
-        result = await run_conversation(
-            user_message=payload.message,
-            auth=auth,
-            history=history,
-            system_prompt=system_prompt,
-            sanitizer=sanitizer,
-            conversation_id=conv_id,
-            vertical=cfg.vertical,
-        )
+        # Balaxys ERP via MCP: sesion abierta solo durante este mensaje. Sin
+        # token o con el ERP caido entrega None y el chat sigue solo retail.
+        async with open_balaxys_mcp(svc.mcp_token) as erp:
+            result = await run_conversation(
+                user_message=payload.message,
+                auth=auth,
+                history=history,
+                system_prompt=system_prompt,
+                sanitizer=sanitizer,
+                conversation_id=conv_id,
+                vertical=cfg.vertical,
+                erp=erp,
+                max_iterations=(
+                    MAX_ITERATIONS
+                    if erp is None
+                    else max(MAX_ITERATIONS, settings.balaxys_mcp_max_tool_calls)
+                ),
+            )
         # ── Token breakdown logging (tenant 24, first 20 queries) ──────────
         from app.llm.token_logger import log_token_breakdown
         from app.tools.production_cache import request_cache_hits_get
@@ -247,6 +272,7 @@ async def internal_chat(
         tokens_input=result.tokens_input,
         tokens_output=result.tokens_output,
         duration_ms=result.duration_ms,
+        cards=[ChatCard(**card.to_dict()) for card in result.cards],
     )
 
 

@@ -10,7 +10,7 @@ Python never validates a user JWT in this path — .NET owns that.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import uuid4
 
 from fastapi import HTTPException, Request, status
@@ -40,6 +40,10 @@ class ServiceAuthContext:
     role: str          # direccion | marca | tienda | sku | produccion
     conversation_id: str | None
     request_id: str    # generated if caller omits X-Request-Id
+    # Token MCP de vida corta del ERP (X-Balaxys-Mcp-Token): habilita las tools
+    # ERP de Balaxys en este mensaje. Solo por la ruta X-Service-Key (ERP proxy).
+    # Nunca se loguea: repr=False.
+    mcp_token: str | None = field(default=None, repr=False)
 
 
 async def get_service_auth_context(request: Request) -> ServiceAuthContext:
@@ -120,4 +124,5 @@ async def get_service_auth_context(request: Request) -> ServiceAuthContext:
         role=role,
         conversation_id=conversation_id,
         request_id=request_id,
+        mcp_token=(request.headers.get("X-Balaxys-Mcp-Token") or "").strip() or None,
     )

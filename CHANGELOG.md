@@ -8,6 +8,31 @@ Versions correspond to sub-phases of the project roadmap (Phase 3 = Gold warehou
 
 ## [Unreleased]
 
+### Added
+- **Chat interno como cliente MCP de Balaxys ERP** (`docs/mcp-client.md`). Con `X-Balaxys-Mcp-Token`
+  (solo ruta `X-Service-Key`), `/api/v1/internal/chat` abre una sesion MCP contra `BALAXYS_MCP_URL`
+  durante el mensaje y suma las tools ERP de Balaxys al loop de Claude. Sin token, sin URL o con el ERP
+  caido, el comportamiento es el de siempre (solo retail).
+- `api/app/mcp_client/` — cliente MCP (SDK oficial `mcp` 1.x, Streamable HTTP) con la conexion aislada
+  en su propia tarea: un 401/5xx a mitad del mensaje degrada a "ERP no disponible" sin cancelar el chat.
+  Nunca expone al modelo tools con `destructiveHint` (confirmar/emitir/enviar: las confirma el usuario
+  con el boton de la tarjeta).
+- `InternalChatResponse.cards` — tarjetas `{tool, title, data}` con el `structuredContent` intacto
+  (maximo 3, primero las que traen `confirmar_con`).
+- `api/app/llm/prompts/erp.py` — bloque de system prompt ERP con las `instructions` del servidor.
+- Settings `BALAXYS_MCP_URL`, `BALAXYS_MCP_ENABLED`, `BALAXYS_MCP_TIMEOUT_SECONDS`,
+  `BALAXYS_MCP_MAX_TOOL_CALLS`, `BALAXYS_MCP_ROLE_SUBSET`, `BALAXYS_MCP_VERIFY_TLS`.
+- `api/tests/test_mcp_client/` — 22 tests (cliente contra servidor MCP en proceso, orquestador con
+  Claude simulado, endpoint con el encabezado).
+
+### Changed
+- `run_conversation(erp=...)`: con tools ERP agrega cache de prompt (ultima tool, system y top-level) y
+  subconjunto de tools por rol para bajar tokens. `tokens_input` pasa a informar tokens equivalentes a
+  tarifa de entrada (`input + 1.25 x cache_write + 0.1 x cache_read`) para que el costo de
+  `audit/persister.py` siga siendo exacto. Sin ERP, el request a Anthropic no cambia.
+- `ServiceAuthContext.mcp_token` (repr=False).
+- Dependencia nueva `mcp>=1.9,<2`.
+
 ---
 
 ## [0.6.1] — 2026-05-27

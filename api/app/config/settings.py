@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     service_key: str = ""     # shared secret with ERP proxy; empty = service auth disabled
     service_mode: bool = False  # True = reject all non-service requests (production only)
 
+    # ── Balaxys ERP via MCP (chat interno como cliente MCP) ──────────────────
+    # El ERP manda un token de vida corta en X-Balaxys-Mcp-Token por mensaje; con
+    # el, el orquestador usa las tools ERP de {balaxys_mcp_url}. URL vacia o
+    # enabled=False -> solo flujo retail (comportamiento previo).
+    balaxys_mcp_enabled: bool = True
+    balaxys_mcp_url: str = ""              # p.ej. https://<api-balaxys>/mcp
+    balaxys_mcp_timeout_seconds: float = 30.0
+    balaxys_mcp_max_tool_calls: int = 8    # tope de llamadas ERP por mensaje
+    balaxys_mcp_verify_tls: bool = True    # False solo para un cert de desarrollo local
+    balaxys_mcp_role_subset: bool = True   # menos tools (y tokens) para roles no-direccion
+
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated origins. In dev: http://localhost:5173,http://localhost:5174
     cors_origins: str = "http://localhost:5173,http://localhost:5174"

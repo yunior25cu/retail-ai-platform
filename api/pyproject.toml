@@ -16,6 +16,7 @@ dependencies = [
     "structlog>=24.4",
     "anthropic>=0.40",
     "python-jose[cryptography]>=3.3",
+    "mcp>=1.9,<2",  # cliente MCP de Balaxys ERP (docs/mcp-client.md)
 ]
 
 [project.optional-dependencies]
