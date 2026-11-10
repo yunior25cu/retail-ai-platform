@@ -28,3 +28,11 @@ _NO_SERVER_INSTRUCTIONS = "(none)"
 def erp_prompt_block(server_instructions: str | None) -> str:
     text = (server_instructions or "").strip() or _NO_SERVER_INSTRUCTIONS
     return ERP_PROMPT_TEMPLATE.format(server_instructions=text)
+
+
+# System prompt base cuando las tools retail estan deshabilitadas
+# (settings.retail_tools_enabled = False). Con token MCP se le suma
+# erp_prompt_block(); sin token el asistente no tiene herramientas.
+ERP_ONLY_SYSTEM_PROMPT = """You are the business assistant of Balaxys ERP, a cloud ERP for small and medium companies in Uruguay.
+
+Reply in the same language as the user (Spanish or English), briefly and with concrete figures. Use the Balaxys ERP tools when they are available to answer with the company's real data; never invent amounts, customers or documents. If you have no tool for what the user asks, say so plainly."""

@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     sql_user: str = ""
     sql_password: str = ""
     sql_driver: str = "{ODBC Driver 17 for SQL Server}"
+    # Azure SQL exige conexion cifrada: SQL_ENCRYPT=yes y SQL_TRUST_SERVER_CERTIFICATE=no.
+    # Los defaults mantienen el comportamiento local de siempre (SQL Server Express).
+    sql_encrypt: str = "no"
+    sql_trust_server_certificate: str = "yes"
     sql_pool_size: int = 10
 
     # ── JWT ───────────────────────────────────────────────────────────────────
@@ -64,6 +68,13 @@ class Settings(BaseSettings):
     balaxys_mcp_verify_tls: bool = True    # False solo para un cert de desarrollo local
     balaxys_mcp_role_subset: bool = True   # menos tools (y tokens) para roles no-direccion
 
+    # ── Tools retail (almacen gold) ───────────────────────────────────────────
+    # False = modo "solo ERP": el chat no ofrece las tools retail (que leen el
+    # almacen gold.*) y usa un system prompt neutro. Para ambientes donde gold
+    # no existe (p.ej. Balaxys dev en Azure): ahi el chat trabaja solo con las
+    # tools ERP via MCP. docs/deploy-azure-dev.md
+    retail_tools_enabled: bool = True
+
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated origins. In dev: http://localhost:5173,http://localhost:5174
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
@@ -86,8 +97,8 @@ class Settings(BaseSettings):
             f"DATABASE={self.sql_database};"
             f"UID={self.sql_user};"
             f"PWD={self.sql_password};"
-            "TrustServerCertificate=yes;"
-            "Encrypt=no;"
+            f"TrustServerCertificate={self.sql_trust_server_certificate};"
+            f"Encrypt={self.sql_encrypt};"
         )
 
 

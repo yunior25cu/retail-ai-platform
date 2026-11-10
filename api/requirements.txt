@@ -1,0 +1,19 @@
+# Dependencias de runtime con version fija. Las instala Azure App Service (Oryx)
+# en cada despliegue: SCM_DO_BUILD_DURING_DEPLOYMENT=true. Ver docs/deploy-azure-dev.md.
+#
+# Versiones fijas a proposito: pyproject.toml declara "anthropic>=0.40" sin cota
+# superior y una instalacion limpia resolveria anthropic 2.x (otra version mayor).
+# bcrypt, psycopg2-binary y slowapi se importan en runtime y no figuran en pyproject.
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+pyodbc==5.3.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+structlog==25.5.0
+anthropic==0.104.1
+python-jose[cryptography]==3.5.0
+bcrypt==5.0.0
+psycopg2-binary==2.9.12
+slowapi==0.1.9
+httpx==0.28.1
+mcp==1.30.0

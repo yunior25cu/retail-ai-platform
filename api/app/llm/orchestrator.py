@@ -102,7 +102,7 @@ async def run_conversation(
     client = client or get_client()
     system_prompt = system_prompt or GENERIC_SYSTEM_PROMPT
     # Filter by vertical first, then by role within that vertical.
-    tools = anthropic_tools(role=auth.role, vertical=vertical)
+    tools = anthropic_tools(role=auth.role, vertical=vertical) if settings.retail_tools_enabled else []
     erp_tool_names: set[str] = set()
     if erp is not None:
         local_names = {t["name"] for t in tools} | set(TOOL_REGISTRY)
@@ -146,12 +146,14 @@ async def run_conversation(
             user=auth.user_id,
         )
 
+        # Sin ninguna tool (modo solo ERP sin token MCP) no se manda el campo.
+        tools_kwargs: dict[str, Any] = {"tools": request_tools} if request_tools else {}
         response = await client.messages.create(
             model=settings.anthropic_model,
             max_tokens=MAX_TOKENS,
             system=request_system,
-            tools=request_tools,
             messages=messages,
+            **tools_kwargs,
             **cache_kwargs,
         )
 

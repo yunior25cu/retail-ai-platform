@@ -51,6 +51,7 @@ from app.db.tenant_config import (
 from app.llm.claude_client import get_client
 from app.llm.orchestrator import MAX_ITERATIONS, run_conversation
 from app.llm.prompts import select_prompt
+from app.llm.prompts.erp import ERP_ONLY_SYSTEM_PROMPT
 from app.mcp_client import open_balaxys_mcp
 from app.security.rate_limiter import RateLimitExceeded, limiter
 from app.security.sanitizer import Sanitizer
@@ -171,7 +172,11 @@ async def internal_chat(
     from app.tools.production_cache import request_cache_hits_reset
     request_cache_hits_reset()
 
-    system_prompt = select_prompt(auth.role, vertical=cfg.vertical)
+    system_prompt = (
+        select_prompt(auth.role, vertical=cfg.vertical)
+        if settings.retail_tools_enabled
+        else ERP_ONLY_SYSTEM_PROMPT
+    )
 
     # Conversation: X-Conversation-Id header takes priority over body field
     conv_requested = svc.conversation_id or payload.conversation_id
