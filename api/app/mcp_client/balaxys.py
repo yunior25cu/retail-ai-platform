@@ -54,7 +54,8 @@ CARD_TOOLS: frozenset[str] = frozenset(
     {
         "resumen_negocio", "tesoreria_resumen", "saldos_bancarios", "cuentas_por_cobrar",
         "cuentas_por_pagar", "clientes_con_deuda_vencida", "listar_facturas",
-        "listar_facturas_compra", "obtener_factura", "consultar_stock", "alertas_reposicion",
+        "listar_facturas_compra", "obtener_factura", "listar_cobros", "obtener_cobro",
+        "consultar_stock", "alertas_reposicion",
         "estado_resultados", "analisis_ventas", "novedades", "resumen_cartera", "cae_disponible",
         "estado_cfe", "crear_factura_borrador", "preparar_recordatorio_cobranza",
     }
@@ -94,7 +95,8 @@ _ERP_GROUPS: dict[str, frozenset[str]] = {
             "analisis_ventas", "listar_facturas", "obtener_factura", "buscar_clientes", "obtener_cliente",
             "crear_cliente", "crear_factura_borrador", "preparar_confirmacion_factura", "cuentas_por_cobrar",
             "antiguedad_cuentas_por_cobrar", "clientes_con_deuda_vencida", "resumen_cartera",
-            "preparar_recordatorio_cobranza", "crear_cobro_borrador", "preparar_confirmacion_cobro",
+            "preparar_recordatorio_cobranza", "listar_cobros", "obtener_cobro", "crear_cobro_borrador",
+            "preparar_confirmacion_cobro",
             "crear_nota_credito_borrador", "preparar_confirmacion_nota_credito", "preparar_emision_cfe",
             "estado_cfe", "cae_disponible",
         }
