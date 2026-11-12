@@ -74,6 +74,8 @@ MAX_CARDS = 3
 # conserva: el boton Confirmar ejecuta ``confirmar_con`` tal cual.
 _TOKEN_FIELD = "token_confirmacion"
 _ACTION_FIELD = "confirmar_con"
+# Marca de las tarjetas de accion guardadas en el historial (ya no se pueden confirmar).
+HISTORY_EXPIRED_FIELD = "confirmacion_vencida"
 _ACTION_NOTE = (
     "Accion preparada. La confirma el usuario con el boton Confirmar de la tarjeta; "
     "no la confirmes vos."
@@ -163,6 +165,19 @@ class ErpCard:
 
     def to_dict(self) -> dict[str, Any]:
         return {"tool": self.tool, "title": self.title, "data": self.data}
+
+    def to_history_dict(self) -> dict[str, Any]:
+        """Version para guardar en el historial de la conversacion.
+
+        Sin ``token_confirmacion`` ni ``confirmar_con``: el token vence a los
+        10 minutos y una tarjeta del historial no debe poder confirmar nada.
+        Las tarjetas de accion quedan marcadas con ``confirmacion_vencida`` para
+        que el cliente muestre que hay que pedir la accion de nuevo.
+        """
+        data = {k: v for k, v in self.data.items() if k not in (_TOKEN_FIELD, _ACTION_FIELD)}
+        if self.has_action:
+            data[HISTORY_EXPIRED_FIELD] = True
+        return {"tool": self.tool, "title": self.title, "data": data}
 
 
 @dataclass(frozen=True)

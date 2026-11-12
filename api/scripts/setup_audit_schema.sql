@@ -70,6 +70,8 @@ BEGIN
         sequence         INT              NOT NULL,
         role             NVARCHAR(20)     NOT NULL,            -- 'user' / 'assistant'
         content_json     NVARCHAR(MAX)    NOT NULL,            -- anthropic content blocks
+        cards_json       NVARCHAR(MAX)    NULL,                -- tarjetas de la respuesta (migracion 013)
+        request_id       NVARCHAR(64)     NULL,                -- request_id de la respuesta (migracion 013)
         created_at       DATETIME2(3)     NOT NULL CONSTRAINT df_conv_msg_created DEFAULT SYSUTCDATETIME(),
         CONSTRAINT fk_conv_msg_conversation FOREIGN KEY (conversation_id)
             REFERENCES api_audit.conversation(conversation_id)

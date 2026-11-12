@@ -260,6 +260,11 @@ no del ERP.
 
 Las conversaciones se retienen indefinidamente en la BD de
 retail-ai-platform (tabla `api_audit.conversation_message`).
+Cada respuesta del asistente guarda tambien sus tarjetas (`cards_json`)
+y su `request_id`; `GET /internal/conversations/{id}/messages` los
+devuelve como `cards` y `request_id` para que el historial muestre las
+mismas tablas y se pueda enviar feedback. Las tarjetas de accion se
+guardan sin token de confirmacion y con `data.confirmacion_vencida = true`.
 No hay política de purga automática en v1. Futuras versiones
 pueden agregar TTL configurable por tenant.
 

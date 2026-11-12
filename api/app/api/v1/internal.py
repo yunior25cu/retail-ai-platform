@@ -294,7 +294,12 @@ async def _persist_success(
     try:
         await append_message(conversation_id=conv_id, role="user", content=message, tenant_id=auth.tenant_id)
         await append_message(
-            conversation_id=conv_id, role="assistant", content=result.response_text, tenant_id=auth.tenant_id
+            conversation_id=conv_id,
+            role="assistant",
+            content=result.response_text,
+            tenant_id=auth.tenant_id,
+            cards=[card.to_history_dict() for card in result.cards],
+            request_id=request_id,
         )
         await touch_conversation(conv_id, tenant_id=auth.tenant_id)
         audit_status = "PARTIAL" if result.stop_reason and result.stop_reason != "end_turn" else "SUCCESS"
@@ -673,6 +678,16 @@ class ConversationMessageItem(BaseModel):
     tools_used: list[str] | None = None
     duration_ms: int | None = None
     created_at: str
+    cards: list[ChatCard] = Field(
+        default_factory=list,
+        description=(
+            "Tarjetas de la respuesta original (solo mensajes del asistente). Sin token de "
+            "confirmacion: las de accion traen data.confirmacion_vencida = true."
+        ),
+    )
+    request_id: str | None = Field(
+        default=None, description="request_id de la respuesta original, para enviar feedback."
+    )
 
 
 @router.get(

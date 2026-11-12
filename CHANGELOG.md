@@ -9,6 +9,14 @@ Versions correspond to sub-phases of the project roadmap (Phase 3 = Gold warehou
 ## [Unreleased]
 
 ### Added
+- **Tarjetas y request_id en el historial de conversaciones.** El chat interno guarda con cada respuesta del
+  asistente sus tarjetas y el `request_id` (columnas nuevas `cards_json` / `request_id` de
+  `conversation_message`, migracion `db/migrations/013_conversation_message_cards.py`, SQL Server y PostgreSQL).
+  `GET /api/v1/internal/conversations/{id}/messages` las devuelve como `cards` y `request_id`, asi una
+  conversacion abierta desde el historial muestra las mismas tablas y se puede calificar. Las tarjetas de accion
+  se guardan sin `token_confirmacion` ni `confirmar_con` y con `data.confirmacion_vencida = true`: desde el
+  historial no se confirma nada. Las tarjetas no van en `content_json` (se le reenvia a Claude). Sin la migracion
+  la API sigue guardando y leyendo solo el texto y reintenta las columnas cada 10 minutos.
 - **Chat interno como cliente MCP de Balaxys ERP** (`docs/mcp-client.md`). Con `X-Balaxys-Mcp-Token`
   (solo ruta `X-Service-Key`), `/api/v1/internal/chat` abre una sesion MCP contra `BALAXYS_MCP_URL`
   durante el mensaje y suma las tools ERP de Balaxys al loop de Claude. Sin token, sin URL o con el ERP

@@ -12,10 +12,51 @@ different tenant returns None.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from uuid import uuid4
 
+import structlog
+
 from app.db.connection import execute_query
+
+log = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Columnas opcionales de conversation_message (migracion 013): cards_json y
+# request_id. Si la base todavia no las tiene, se escribe y se lee como antes
+# y se reintenta cada _OPTIONAL_COLUMNS_RETRY_S (despues de migrar no hace
+# falta reiniciar la API).
+# ---------------------------------------------------------------------------
+
+_OPTIONAL_COLUMNS_RETRY_S = 600.0
+_optional_columns_missing_until: dict[str, float] = {}
+
+
+def _optional_columns_available(backend: str) -> bool:
+    return time.monotonic() >= _optional_columns_missing_until.get(backend, 0.0)
+
+
+def _is_missing_optional_column(error: Exception) -> bool:
+    text = str(error).lower()
+    return ("cards_json" in text or "request_id" in text) and (
+        "invalid column" in text or "does not exist" in text or "undefined" in text
+    )
+
+
+def _mark_optional_columns_missing(backend: str, error: Exception) -> None:
+    _optional_columns_missing_until[backend] = time.monotonic() + _OPTIONAL_COLUMNS_RETRY_S
+    log.warning("conversation.optional_columns_missing", backend=backend, detail=str(error)[:200])
+
+
+def _parse_cards(cards_json: Any) -> list[dict[str, Any]]:
+    if not cards_json:
+        return []
+    try:
+        parsed = json.loads(cards_json)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [c for c in parsed if isinstance(c, dict)] if isinstance(parsed, list) else []
 
 
 # ---------------------------------------------------------------------------
@@ -111,10 +152,23 @@ async def touch_conversation(conversation_id: str, tenant_id: int = 0) -> None:
 # ---------------------------------------------------------------------------
 
 async def append_message(
-    *, conversation_id: str, role: str, content: Any, tenant_id: int = 0
+    *,
+    conversation_id: str,
+    role: str,
+    content: Any,
+    tenant_id: int = 0,
+    cards: list[dict[str, Any]] | None = None,
+    request_id: str | None = None,
 ) -> int:
-    """Append a message; return its sequence number (1-based)."""
+    """Append a message; return its sequence number (1-based).
+
+    ``cards`` (tarjetas ya preparadas para el historial) y ``request_id`` solo
+    se guardan en las respuestas del asistente. No van en ``content_json``:
+    ese campo se le reenvia a Claude como historia.
+    """
     content_json = json.dumps(content, default=str, ensure_ascii=False)
+    cards_json = json.dumps(cards, default=str, ensure_ascii=False) if cards else None
+    with_optional = cards_json is not None or request_id is not None
 
     if _is_pg(tenant_id):
         rows = await _pg_execute(
@@ -124,6 +178,20 @@ async def append_message(
             (conversation_id,),
         )
         seq = int(rows[0]["seq"]) if rows else 1
+        if with_optional and _optional_columns_available("pg"):
+            try:
+                await _pg_write(
+                    """INSERT INTO audit.conversation_message
+                           (conversation_id, sequence, role, content_json, cards_json, request_id)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (conversation_id, sequence) DO NOTHING""",
+                    (conversation_id, seq, role, content_json, cards_json, request_id),
+                )
+                return seq
+            except Exception as e:  # noqa: BLE001
+                if not _is_missing_optional_column(e):
+                    raise
+                _mark_optional_columns_missing("pg", e)
         await _pg_write(
             """INSERT INTO audit.conversation_message
                    (conversation_id, sequence, role, content_json)
@@ -140,6 +208,19 @@ async def append_message(
             (conversation_id,),
         )
         seq = int(next_seq_rows[0]["seq"]) if next_seq_rows else 1
+        if with_optional and _optional_columns_available("ss"):
+            try:
+                await execute_query(
+                    """INSERT INTO api_audit.conversation_message
+                           (conversation_id, sequence, role, content_json, cards_json, request_id)
+                       VALUES (CAST(? AS UNIQUEIDENTIFIER), ?, ?, ?, ?, ?);""",
+                    (conversation_id, seq, role, content_json, cards_json, request_id),
+                )
+                return seq
+            except Exception as e:  # noqa: BLE001
+                if not _is_missing_optional_column(e):
+                    raise
+                _mark_optional_columns_missing("ss", e)
         await execute_query(
             """INSERT INTO api_audit.conversation_message
                    (conversation_id, sequence, role, content_json)
@@ -328,10 +409,46 @@ async def fetch_conversations(
 async def fetch_conversation_messages_for_history(
     conversation_id: str, tenant_id: int
 ) -> list[dict[str, Any]]:
-    """Return all messages for *conversation_id*, validating tenant ownership."""
-    if _is_pg(tenant_id):
-        rows = await _pg_execute(
-            """SELECT cm.role, cm.content_json, cm.created_at
+    """Return all messages for *conversation_id*, validating tenant ownership.
+
+    Incluye las tarjetas (``cards``) y el ``request_id`` de cada respuesta del
+    asistente cuando la base tiene esas columnas (migracion 013).
+    """
+    backend = "pg" if _is_pg(tenant_id) else "ss"
+    rows: list[dict[str, Any]] | None = None
+    if _optional_columns_available(backend):
+        try:
+            rows = await _history_rows(backend, conversation_id, tenant_id, with_optional=True)
+        except Exception as e:  # noqa: BLE001
+            if not _is_missing_optional_column(e):
+                raise
+            _mark_optional_columns_missing(backend, e)
+    if rows is None:
+        rows = await _history_rows(backend, conversation_id, tenant_id, with_optional=False)
+
+    return [
+        {
+            "role": row["role"],
+            "content": _extract_content_text(row["content_json"]),
+            "tools_used": None,
+            "duration_ms": None,
+            "created_at": (
+                row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
+            ),
+            "cards": _parse_cards(row.get("cards_json")),
+            "request_id": row.get("request_id") or None,
+        }
+        for row in rows
+    ]
+
+
+async def _history_rows(
+    backend: str, conversation_id: str, tenant_id: int, *, with_optional: bool
+) -> list[dict[str, Any]]:
+    if backend == "pg":
+        extra = ", cm.cards_json, cm.request_id" if with_optional else ""
+        return await _pg_execute(
+            f"""SELECT cm.role, cm.content_json, cm.created_at{extra}
                FROM audit.conversation_message cm
                INNER JOIN audit.conversation c
                    ON c.conversation_id = cm.conversation_id
@@ -340,37 +457,17 @@ async def fetch_conversation_messages_for_history(
                ORDER BY cm.sequence ASC""",
             (tenant_id, conversation_id),
         )
-        return [
-            {
-                "role": row["role"],
-                "content": _extract_content_text(row["content_json"]),
-                "tools_used": None,
-                "duration_ms": None,
-                "created_at": row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
-            }
-            for row in rows
-        ]
-    else:
-        rows = await execute_query(
-            """SELECT cm.role, cm.content_json,
-                      CONVERT(NVARCHAR(30), cm.created_at, 127) AS created_at
-               FROM api_audit.conversation_message cm
-               INNER JOIN api_audit.conversation c
-                   ON c.conversation_id = cm.conversation_id AND c.tenant_id = ?
-               WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
-               ORDER BY cm.sequence ASC;""",
-            (tenant_id, conversation_id),
-        )
-        return [
-            {
-                "role": row["role"],
-                "content": _extract_content_text(row["content_json"]),
-                "tools_used": None,
-                "duration_ms": None,
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+    extra = ", cm.cards_json, cm.request_id" if with_optional else ""
+    return await execute_query(
+        f"""SELECT cm.role, cm.content_json,
+                  CONVERT(NVARCHAR(30), cm.created_at, 127) AS created_at{extra}
+           FROM api_audit.conversation_message cm
+           INNER JOIN api_audit.conversation c
+               ON c.conversation_id = cm.conversation_id AND c.tenant_id = ?
+           WHERE cm.conversation_id = CAST(? AS UNIQUEIDENTIFIER)
+           ORDER BY cm.sequence ASC;""",
+        (tenant_id, conversation_id),
+    )
 
 
 # ---------------------------------------------------------------------------
