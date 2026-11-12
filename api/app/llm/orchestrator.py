@@ -28,10 +28,16 @@ import structlog
 from app.auth.dependencies import AuthContext
 from app.config import settings
 from app.llm.claude_client import get_client
-from app.llm.prompts.erp import erp_prompt_block
+from app.llm.prompts.erp import erp_context_block, erp_prompt_block
 from app.llm.prompts.generic import GENERIC_SYSTEM_PROMPT
 from app.llm.tool_dispatcher import dispatch_tool
-from app.mcp_client.balaxys import BalaxysMcpSession, ErpCard, select_cards, tools_for_role
+from app.mcp_client.balaxys import (
+    CONTEXT_TOOL,
+    BalaxysMcpSession,
+    ErpCard,
+    select_cards,
+    tools_for_role,
+)
 from app.security.sanitizer import Sanitizer
 from app.tools import TOOL_REGISTRY, anthropic_tools
 
@@ -117,6 +123,12 @@ async def run_conversation(
             tools.append(tool_def)
             erp_tool_names.add(tool_def["name"])
         system_prompt = system_prompt + erp_prompt_block(erp.instructions)
+    # Contexto de la empresa (nombre, moneda, fecha de hoy) pedido directo al ERP:
+    # ahorra la ronda en la que el modelo llamaba obtener_contexto_empresa en
+    # cada mensaje. Va en un bloque de system aparte para no romper la cache.
+    context_block: str | None = None
+    if erp is not None and CONTEXT_TOOL in erp_tool_names:
+        context_block = erp_context_block(await erp.company_context())
     collected_cards: list[ErpCard] = []
 
     # Cache de prompt (solo con tools ERP, ~10k tokens de definiciones): un
@@ -131,6 +143,8 @@ async def run_conversation(
     if erp_tool_names:
         request_tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
         request_system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+        if context_block:
+            request_system.append({"type": "text", "text": context_block})
         cache_kwargs = {"cache_control": {"type": "ephemeral"}}
 
     messages: list[dict[str, Any]] = list(history or [])

@@ -11,6 +11,7 @@ either from the X-Conversation-Id header (priority) or the request body.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import Counter
@@ -19,7 +20,7 @@ from typing import Annotated, Any
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.audit.persister import persist_audit_row
@@ -120,6 +121,7 @@ class InternalChatResponse(BaseModel):
 async def internal_chat(
     payload: InternalChatRequest,
     svc: Annotated[ServiceAuthContext, Depends(get_service_auth_context)],
+    background_tasks: BackgroundTasks,
 ) -> InternalChatResponse:
     t0 = time.perf_counter()
 
@@ -182,8 +184,10 @@ async def internal_chat(
     conv_requested = svc.conversation_id or payload.conversation_id
     conv_id = await _resolve_conversation(conv_requested, auth)
 
-    history = await load_recent_messages(
-        conv_id, tenant_id=auth.tenant_id, turns=cfg.memory_turns,
+    # El historial se lee mientras se abre la sesion MCP (dos idas y vueltas al
+    # ERP): ninguna depende de la otra.
+    history_task = asyncio.create_task(
+        load_recent_messages(conv_id, tenant_id=auth.tenant_id, turns=cfg.memory_turns)
     )
     sanitizer = Sanitizer()
 
@@ -191,6 +195,8 @@ async def internal_chat(
         # Balaxys ERP via MCP: sesion abierta solo durante este mensaje. Sin
         # token o con el ERP caido entrega None y el chat sigue solo retail.
         async with open_balaxys_mcp(svc.mcp_token) as erp:
+            history = await history_task
+            prep_ms = int((time.perf_counter() - t0) * 1000)
             result = await run_conversation(
                 user_message=payload.message,
                 auth=auth,
@@ -235,38 +241,32 @@ async def internal_chat(
         )
         raise HTTPException(status_code=500, detail="internal_error") from e
 
-    await append_message(conversation_id=conv_id, role="user", content=payload.message, tenant_id=auth.tenant_id)
-    await append_message(
-        conversation_id=conv_id, role="assistant", content=result.response_text, tenant_id=auth.tenant_id
-    )
-    await touch_conversation(conv_id, tenant_id=auth.tenant_id)
-
-    audit_status = (
-        "PARTIAL"
-        if result.stop_reason and result.stop_reason != "end_turn"
-        else "SUCCESS"
-    )
-    await persist_audit_row(
-        request_id=svc.request_id,
-        conversation_id=conv_id,
-        tenant_id=auth.tenant_id,
-        user_id=auth.user_id,
-        user_role=auth.role,
-        user_question=payload.message,
-        system_prompt=system_prompt,
-        tools_invoked=result.tools_invoked,
-        final_response=result.response_text,
-        tokens_input=result.tokens_input,
-        tokens_output=result.tokens_output,
-        duration_ms=result.duration_ms,
-        status=audit_status,
-        error_msg=None,
-    )
-
     limiter.record_tokens(auth.tenant_id, result.tokens_input + result.tokens_output)
 
     final_text = await sanitizer.detokenize_text(
         result.response_text, conversation_id=conv_id, role=auth.role
+    )
+
+    # Historial y auditoria se escriben despues de enviar la respuesta (cuatro
+    # escrituras a la base que el usuario no necesita esperar). FastAPI corre la
+    # tarea al terminar de mandar el response.
+    background_tasks.add_task(
+        _persist_success,
+        conv_id=conv_id,
+        auth=auth,
+        request_id=svc.request_id,
+        message=payload.message,
+        system_prompt=system_prompt,
+        result=result,
+    )
+    log.info(
+        "chat.timing",
+        request_id=svc.request_id,
+        prep_ms=prep_ms,
+        llm_ms=result.duration_ms,
+        total_ms=int((time.perf_counter() - t0) * 1000),
+        iterations=result.iterations,
+        tools=[t.name for t in result.tools_invoked],
     )
 
     return InternalChatResponse(
@@ -279,6 +279,43 @@ async def internal_chat(
         duration_ms=result.duration_ms,
         cards=[ChatCard(**card.to_dict()) for card in result.cards],
     )
+
+
+async def _persist_success(
+    *,
+    conv_id: str,
+    auth: AuthContext,
+    request_id: str,
+    message: str,
+    system_prompt: str,
+    result: Any,
+) -> None:
+    """Guarda el turno (historial + auditoria) en segundo plano. Nunca lanza."""
+    try:
+        await append_message(conversation_id=conv_id, role="user", content=message, tenant_id=auth.tenant_id)
+        await append_message(
+            conversation_id=conv_id, role="assistant", content=result.response_text, tenant_id=auth.tenant_id
+        )
+        await touch_conversation(conv_id, tenant_id=auth.tenant_id)
+        audit_status = "PARTIAL" if result.stop_reason and result.stop_reason != "end_turn" else "SUCCESS"
+        await persist_audit_row(
+            request_id=request_id,
+            conversation_id=conv_id,
+            tenant_id=auth.tenant_id,
+            user_id=auth.user_id,
+            user_role=auth.role,
+            user_question=message,
+            system_prompt=system_prompt,
+            tools_invoked=result.tools_invoked,
+            final_response=result.response_text,
+            tokens_input=result.tokens_input,
+            tokens_output=result.tokens_output,
+            duration_ms=result.duration_ms,
+            status=audit_status,
+            error_msg=None,
+        )
+    except Exception as e:  # noqa: BLE001 - la respuesta ya se envio
+        log.error("chat.persist_failed", request_id=request_id, reason=type(e).__name__, detail=str(e)[:300])
 
 
 # ---------------------------------------------------------------------------

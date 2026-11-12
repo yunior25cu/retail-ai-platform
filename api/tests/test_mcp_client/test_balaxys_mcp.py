@@ -20,11 +20,18 @@ from typing import Any
 import httpx
 import pytest
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from app.config import settings
 from app.mcp_client import open_balaxys_mcp
-from app.mcp_client.balaxys import MAX_CARDS, ErpCard, select_cards
+from app.mcp_client.balaxys import (
+    CONTEXT_TOOL,
+    MAX_CARDS,
+    BalaxysMcpSession,
+    ErpCard,
+    ErpTool,
+    select_cards,
+)
 
 TOKEN = "bmcp.test-token"
 URL = "http://localhost:8000/mcp"
@@ -59,6 +66,26 @@ def _build_server() -> FastMCP:
     def confirmar_factura(id_factura: int, token_confirmacion: str) -> str:
         """Confirma una factura."""
         return "confirmada"
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True), structured_output=True)
+    def obtener_contexto_empresa() -> dict[str, Any]:
+        """Datos basicos de la empresa."""
+        return {
+            "empresa": {
+                "nombre": "Kapepro Uruguay SAS",
+                "rut": "219999990011",
+                "pais": "Uruguay",
+                "codigo_pais": "UY",
+                "moneda_base": {"codigo": "UYU", "nombre": "Peso uruguayo", "simbolo": "$U"},
+                "zona_horaria": "America/Montevideo",
+                "emite_efactura": True,
+            },
+            "fecha_hoy": "2026-11-12",
+            "usuario": {"correo": "persona@ejemplo.com"},
+            "conexion": {"asistente": "Balaxys Chat (interno)", "permisos": "erp.leer erp.borradores"},
+            "herramientas_disponibles": ["clientes_con_deuda_vencida", "obtener_contexto_empresa"],
+            "url_erp": "https://erp.ejemplo/",
+        }
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def falla_negocio() -> str:
@@ -213,6 +240,47 @@ async def test_caida_del_erp_a_mitad_del_mensaje_no_cancela_al_orquestador():
         again = await erp.call("clientes_con_deuda_vencida", {})
         assert again.is_error and again.payload["error"] == "erp_no_disponible", "no reintenta en loop"
         await asyncio.sleep(0)  # seguimos corriendo: no hubo CancelledError en esta tarea
+
+
+async def test_company_context_trae_lo_minimo_sin_datos_del_usuario_y_no_gasta_llamadas():
+    async with erp_server() as srv, open_balaxys_mcp(TOKEN, http_client_factory=srv.factory) as erp:
+        assert erp is not None
+        context = await erp.company_context()
+        assert erp.calls_used == 0, "no cuenta para el tope de llamadas del modelo"
+    assert context == {
+        "empresa": "Kapepro Uruguay SAS",
+        "pais": "Uruguay",
+        "moneda_base": "UYU",
+        "simbolo_moneda": "$U",
+        "zona_horaria": "America/Montevideo",
+        "emite_efactura": True,
+        "fecha_hoy": "2026-11-12",
+    }
+
+
+def _session(call: Any, tool_names: list[str]) -> BalaxysMcpSession:
+    tools = [ErpTool(n, n, n, {"type": "object"}, read_only=True, has_card=False) for n in tool_names]
+    return BalaxysMcpSession(_call=call, tools=tools, instructions=None, timeout_seconds=5, max_calls=8)
+
+
+async def test_company_context_none_si_la_tool_no_esta_o_falla():
+    async def never(name: str, args: dict[str, Any]) -> Any:
+        raise AssertionError("no debe llamar")
+
+    assert await _session(never, ["clientes_con_deuda_vencida"]).company_context() is None
+
+    async def error_de_negocio(name: str, args: dict[str, Any]) -> CallToolResult:
+        return CallToolResult(content=[TextContent(type="text", text="sin permiso")], isError=True)
+
+    assert await _session(error_de_negocio, [CONTEXT_TOOL]).company_context() is None
+
+    async def caido(name: str, args: dict[str, Any]) -> Any:
+        raise ConnectionError("red")
+
+    session = _session(caido, [CONTEXT_TOOL, "novedades"])
+    assert await session.company_context() is None
+    after = await session.call("novedades", {})
+    assert after.is_error and after.payload["error"] == "erp_no_disponible", "queda marcada como caida"
 
 
 def test_select_cards_prioriza_acciones_y_limita():

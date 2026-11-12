@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 from app.auth.dependencies import AuthContext
 from app.config import settings
 from app.llm.orchestrator import run_conversation
-from app.llm.prompts.erp import erp_prompt_block
+from app.llm.prompts.erp import erp_context_block, erp_prompt_block
 from app.mcp_client.balaxys import ErpCard, ErpTool, ErpToolResult
 from app.tools import anthropic_tools
 
@@ -50,7 +50,13 @@ class FakeErp:
     results: dict[str, ErpToolResult]
     tool_names: list[str]
     instructions: str | None = "Llama primero a obtener_contexto_empresa."
+    context: dict[str, Any] | None = None
     calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    context_requests: int = 0
+
+    async def company_context(self) -> dict[str, Any] | None:
+        self.context_requests += 1
+        return self.context
 
     @property
     def tools(self) -> list[ErpTool]:
@@ -108,6 +114,48 @@ async def test_con_erp_agrega_tools_y_bloque_de_prompt_y_rutea_la_llamada_al_erp
     assert [t.name for t in result.tools_invoked] == ["clientes_con_deuda_vencida"]
     assert result.cards == [card]
     assert result.response_text.startswith("Tenes")
+
+
+CONTEXT = {
+    "empresa": "Kapepro Uruguay SAS",
+    "pais": "Uruguay",
+    "moneda_base": "UYU",
+    "simbolo_moneda": "$U",
+    "zona_horaria": "America/Montevideo",
+    "emite_efactura": True,
+    "fecha_hoy": "2026-11-12",
+}
+
+
+async def test_contexto_de_la_empresa_va_en_un_bloque_aparte_fuera_de_la_cache():
+    erp = FakeErp(results={}, tool_names=["obtener_contexto_empresa", "novedades"], context=CONTEXT)
+    client = _client([_msg([_text("ok")], "end_turn")])
+    await run_conversation("como viene el mes", AUTH, client=client, system_prompt=BASE_PROMPT, erp=erp)  # type: ignore[arg-type]
+
+    system = client.messages.create.call_args.kwargs["system"]
+    assert erp.context_requests == 1
+    assert len(system) == 2
+    assert system[0]["text"] == BASE_PROMPT + erp_prompt_block(erp.instructions), "el bloque cacheado no cambia"
+    assert "cache_control" in system[0] and "cache_control" not in system[1]
+    assert system[1]["text"] == erp_context_block(CONTEXT)
+    assert "- Today: 2026-11-12" in system[1]["text"]
+    assert "- Base currency: UYU" in system[1]["text"]
+    assert "- Issues e-invoices (CFE): yes" in system[1]["text"]
+    assert erp.calls == [], "el contexto no pasa por el modelo ni por erp.call"
+
+
+async def test_sin_contexto_o_sin_la_tool_el_system_queda_como_antes():
+    sin_tool = FakeErp(results={}, tool_names=["novedades"], context=CONTEXT)
+    client = _client([_msg([_text("ok")], "end_turn")])
+    await run_conversation("hola", AUTH, client=client, system_prompt=BASE_PROMPT, erp=sin_tool)  # type: ignore[arg-type]
+    assert sin_tool.context_requests == 0
+    assert len(client.messages.create.call_args.kwargs["system"]) == 1
+
+    fallo = FakeErp(results={}, tool_names=["obtener_contexto_empresa"], context=None)
+    client = _client([_msg([_text("ok")], "end_turn")])
+    await run_conversation("hola", AUTH, client=client, system_prompt=BASE_PROMPT, erp=fallo)  # type: ignore[arg-type]
+    assert fallo.context_requests == 1
+    assert len(client.messages.create.call_args.kwargs["system"]) == 1
 
 
 async def test_error_del_erp_llega_al_modelo_y_el_loop_sigue():

@@ -60,6 +60,9 @@ CARD_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Tool del ERP con los datos basicos de la empresa (nombre, moneda, fecha de hoy).
+CONTEXT_TOOL = "obtener_contexto_empresa"
+
 # Toda tool ``preparar_*`` devuelve ``confirmar_con``: siempre lleva tarjeta.
 _PREPARE_PREFIX = "preparar_"
 
@@ -216,6 +219,27 @@ class BalaxysMcpSession:
 
         return _to_result(tool, result, _ms(t0))
 
+    async def company_context(self) -> dict[str, Any] | None:
+        """Datos basicos de la empresa para el system prompt, sin pasar por el modelo.
+
+        Llama directo a ``obtener_contexto_empresa`` (no cuenta para ``max_calls``)
+        para que el modelo no gaste una ronda entera en pedirlos en cada mensaje.
+        ``None`` si la tool no esta o falla: el modelo la llama como antes.
+        """
+        if self._broken or not self.has_tool(CONTEXT_TOOL):
+            return None
+        t0 = time.perf_counter()
+        try:
+            result = await self._call(CONTEXT_TOOL, {})
+        except Exception as e:  # noqa: BLE001 - igual que call(): el chat no se cae
+            self._broken = True
+            log.warning("mcp.context_failed", reason=type(e).__name__, detail=_short(e))
+            return None
+        data = result.structuredContent if isinstance(result.structuredContent, dict) else None
+        context = None if result.isError or data is None else _compact_context(data)
+        log.info("mcp.context", ms=_ms(t0), ok=context is not None)
+        return context
+
 
 def select_cards(cards: list[ErpCard]) -> list[ErpCard]:
     """Hasta MAX_CARDS tarjetas, primero las que traen accion, en orden de aparicion."""
@@ -242,6 +266,7 @@ async def open_balaxys_mcp(
 
     timeout = float(settings.balaxys_mcp_timeout_seconds)
     worker = _McpWorker(url, token, timeout, http_client_factory or _default_http_client)
+    t0 = time.perf_counter()
     try:
         init, listed = await worker.start()
         tools = sorted(
@@ -261,7 +286,7 @@ async def open_balaxys_mcp(
         timeout_seconds=timeout,
         max_calls=max(1, int(settings.balaxys_mcp_max_tool_calls)),
     )
-    log.info("mcp.connected", tools=len(tools))
+    log.info("mcp.connected", tools=len(tools), ms=_ms(t0))
     try:
         yield erp
     finally:
@@ -410,6 +435,27 @@ def _to_result(tool: ErpTool, result: CallToolResult, ms: int) -> ErpToolResult:
         title = structured.get("titulo") if isinstance(structured.get("titulo"), str) else None
         card = ErpCard(tool=tool.name, title=title or tool.title, data=structured)
     return ErpToolResult(_for_model(structured), False, ms, card)
+
+
+def _compact_context(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Lo minimo de ``obtener_contexto_empresa`` que el modelo necesita en cada mensaje.
+
+    Sin correo del usuario, permisos ni lista de tools (el modelo ya tiene las tools).
+    """
+    empresa = data.get("empresa") if isinstance(data.get("empresa"), dict) else None
+    fecha = data.get("fecha_hoy")
+    if empresa is None or not isinstance(fecha, str) or not fecha:
+        return None
+    moneda = empresa.get("moneda_base") if isinstance(empresa.get("moneda_base"), dict) else {}
+    return {
+        "empresa": empresa.get("nombre"),
+        "pais": empresa.get("pais"),
+        "moneda_base": moneda.get("codigo"),
+        "simbolo_moneda": moneda.get("simbolo"),
+        "zona_horaria": empresa.get("zona_horaria"),
+        "emite_efactura": empresa.get("emite_efactura"),
+        "fecha_hoy": fecha,
+    }
 
 
 def _for_model(data: dict[str, Any]) -> dict[str, Any]:
